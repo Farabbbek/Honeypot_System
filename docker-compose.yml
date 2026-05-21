@@ -63,11 +63,11 @@ services:
     ports:
       - "2222:2222"
     volumes:
-      - cowrie_logs:/home/cowrie/cowrie/log
-      - cowrie_downloads:/home/cowrie/cowrie/dl
-      - ./cowrie/cowrie.cfg:/home/cowrie/cowrie/etc/cowrie.cfg:ro
-      - ./cowrie/userdb.txt:/home/cowrie/cowrie/etc/userdb.txt:ro
-      - ./cowrie/honeyfs:/home/cowrie/cowrie/honeyfs:ro
+      - cowrie_logs:/cowrie/cowrie-git/var/log/cowrie
+      - cowrie_downloads:/cowrie/cowrie-git/var/lib/cowrie/downloads
+      - ./cowrie/cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
+      - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
+      - ./cowrie/honeyfs:/cowrie/cowrie-git/honeyfs:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -86,7 +86,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       REDIS_STREAM: cowrie:events
       COWRIE_JSON_LOG: /var/log/cowrie/cowrie.json
-      COWRIE_HONEYFS_ROOT: /opt/cowrie/honeyfs
+      COWRIE_HONEYFS_ROOT: /cowrie/cowrie-git/honeyfs
       REPORT_OUTPUT_DIR: /app/reports
       GEOIP_CITY_DB: /app/geoip/GeoLite2-City.mmdb
       GEOIP_ASN_DB: /app/geoip/GeoLite2-ASN.mmdb
