@@ -1,0 +1,49 @@
+# ===== Environment =====
+.env
+.env.local
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+.Python
+*.log
+
+# ===== Node.js / Next.js =====
+node_modules/
+.next/
+out/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Cowrie source (use Docker Hub image instead) =====
+cowrie/cowrie/
+
+# ===== Docker volumes =====
+postgres-data/
+cowrie-logs/
+cowrie-downloads/
+cowrie-state/
+
+# ===== Reports =====
+backend/reports/*.pdf
+backend/reports/*.md
+!backend/reports/.gitkeep
+
+# ===== OS =====
+.DS_Store
+Thumbs.db

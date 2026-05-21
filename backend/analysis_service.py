@@ -1,0 +1,151 @@
+"""
+Shared analysis service used by both collector.py and main.py.
+
+Eliminates code duplication for:
+- IP enrichment
+- LLM report generation
+- ThreatReport creation
+- PDF export
+- Telegram notification
+"""
+
+import asyncio
+import logging
+from typing import Any
+
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session as DBSession
+
+from ip_enrichment import IPEnrichmentService
+from llm_agent import LLMAgent
+from models import IPIntel, Session, ThreatReport
+from notifier import TelegramNotifier
+from pdf_export import PDFExporter
+
+logger = logging.getLogger(__name__)
+AUTO_NOTIFY_SEVERITIES = {"MEDIUM", "HIGH", "CRITICAL"}
+
+
+class AnalysisService:
+    def __init__(
+        self,
+        llm_agent: LLMAgent | None = None,
+        notifier: TelegramNotifier | None = None,
+        pdf_exporter: PDFExporter | None = None,
+        ip_enrichment: IPEnrichmentService | None = None,
+        output_dir: str = "/app/reports",
+        llm_max_concurrent: int = 3,
+    ) -> None:
+        self.llm_agent = llm_agent or LLMAgent()
+        self.notifier = notifier or TelegramNotifier()
+        self.pdf_exporter = pdf_exporter or PDFExporter(output_dir)
+        self.ip_enrichment = ip_enrichment or IPEnrichmentService()
+        self._llm_semaphore = asyncio.Semaphore(llm_max_concurrent)
+
+    async def analyze_and_report(
+        self,
+        session: Session,
+        events: list[Any],
+        intel: IPIntel | None,
+        db: DBSession,
+    ) -> ThreatReport:
+        """Full analysis pipeline: enrich IP, generate LLM report, save, PDF, notify."""
+        session_id = session.session_id
+
+        if not intel:
+            try:
+                enriched = await self.ip_enrichment.enrich(session.attacker_ip)
+            except Exception as exc:
+                logger.warning("IP enrichment failed for %s: %s", session.attacker_ip, exc)
+                enriched = {"ip": session.attacker_ip}
+            intel = self._upsert_ip_intel(db, enriched)
+            db.commit()
+
+        async with self._llm_semaphore:
+            report_payload = await self.llm_agent.analyze_session(
+                self.model_to_dict(session),
+                [self.model_to_dict(event) for event in events],
+                self.model_to_dict(intel) if intel else None,
+            )
+        report_payload = self._merge_ioc(report_payload, session, intel)
+        severity = self._resolve_severity(report_payload.get("severity"), session.severity)
+
+        report = ThreatReport(
+            session_id=session_id,
+            attack_type=report_payload.get("attack_type"),
+            severity=severity,
+            mitre_techniques=report_payload.get("mitre_techniques", []),
+            kill_chain_phase=report_payload.get("kill_chain_phase"),
+            attacker_goal=report_payload.get("attacker_goal"),
+            attacker_profile=report_payload.get("attacker_profile"),
+            ioc=report_payload.get("ioc", {}),
+            recommendation=report_payload.get("recommendation"),
+            confidence=report_payload.get("confidence"),
+            raw_llm_response=report_payload.get("raw_llm_response"),
+        )
+        db.add(report)
+        db.commit()
+        db.refresh(report)
+
+        try:
+            path = self.pdf_exporter.export(
+                self.model_to_dict(report),
+                self.model_to_dict(session),
+                [self.model_to_dict(event) for event in events],
+            )
+            report.pdf_path = path
+            db.commit()
+            db.refresh(report)
+        except Exception as exc:
+            logger.warning("PDF export failed for session %s: %s", session_id, exc)
+
+        if report.severity in AUTO_NOTIFY_SEVERITIES:
+            payload = {**report_payload, "session_id": session_id, "severity": report.severity}
+            try:
+                sent = await self.notifier.send_attack_alert(payload)
+            except Exception as exc:
+                logger.warning("Telegram notify failed for session %s: %s", session_id, exc)
+                sent = False
+            report.notification_sent = sent
+            db.commit()
+
+        return report
+
+    def _upsert_ip_intel(self, db: DBSession, data: dict[str, Any]) -> IPIntel:
+        stmt = insert(IPIntel).values(**data)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[IPIntel.ip],
+            set_={key: value for key, value in data.items() if key != "ip"},
+        ).returning(IPIntel)
+        return db.execute(stmt).scalar_one()
+
+    def _merge_ioc(self, report_payload: dict[str, Any], session: Session, intel: IPIntel | None) -> dict[str, Any]:
+        ioc = dict(report_payload.get("ioc") or {})
+        ioc.setdefault("ip", session.attacker_ip)
+
+        if intel:
+            if not ioc.get("country") or str(ioc.get("country")).lower() in {"unknown", "n/a"}:
+                ioc["country"] = intel.country_name
+            if not ioc.get("city") or str(ioc.get("city")).lower() in {"unknown", "n/a"}:
+                ioc["city"] = intel.city
+            if not ioc.get("asn"):
+                ioc["asn"] = intel.asn
+            if not ioc.get("org"):
+                ioc["org"] = intel.org_name
+            if not ioc.get("country_code"):
+                ioc["country_code"] = intel.country_code
+            if ioc.get("abuse_score") in {None, "unknown", "n/a"} and intel.abuse_confidence_score is not None:
+                ioc["abuse_score"] = intel.abuse_confidence_score
+
+        report_payload["ioc"] = ioc
+        return report_payload
+
+    def _resolve_severity(self, report_severity: str | None, session_severity: str | None) -> str:
+        rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        report_value = (report_severity or "").upper()
+        session_value = (session_severity or "").upper()
+        resolved = report_value if rank.get(report_value, -1) >= rank.get(session_value, -1) else session_value
+        return resolved if resolved in rank else "LOW"
+
+    def model_to_dict(self, model: Any) -> dict[str, Any]:
+        return {column.name: getattr(model, column.name) for column in model.__table__.columns}

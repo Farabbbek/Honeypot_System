@@ -1,0 +1,5 @@
+#!/bin/sh
+echo "[bot] init"
+echo "[bot] host=prod-web-01"
+echo "[bot] connect attacker.com:443"
+echo "[bot] done"

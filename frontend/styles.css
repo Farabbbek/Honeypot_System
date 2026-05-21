@@ -1,0 +1,149 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@layer base {
+  html {
+    font-family: "Inter", system-ui, sans-serif;
+    background: #07111f;
+    color: #e2e8f0;
+  }
+  
+  body {
+    background: #07111f;
+    color: #e2e8f0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0,229,255,0.15) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0,229,255,0.15);
+    border-radius: 3px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0,229,255,0.25);
+  }
+}
+
+@layer components {
+  .glass {
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(20px) saturate(1.8);
+    border: 1px solid rgba(148, 163, 184, 0.08);
+  }
+
+  .glass-elevated {
+    background: rgba(30, 41, 59, 0.5);
+    backdrop-filter: blur(24px) saturate(1.8);
+    border: 1px solid rgba(148, 163, 184, 0.1);
+  }
+
+  .neon-glow {
+    box-shadow: 0 0 40px rgba(0, 229, 255, 0.06);
+  }
+
+  .neon-glow-danger {
+    box-shadow: 0 0 40px rgba(255, 77, 77, 0.08);
+  }
+
+  .neon-glow-success {
+    box-shadow: 0 0 40px rgba(124, 255, 107, 0.08);
+  }
+
+  .sidebar-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 cursor-pointer;
+    color: #64748b;
+  }
+
+  .sidebar-item:hover {
+    background: rgba(0, 229, 255, 0.05);
+    color: #e2e8f0;
+  }
+
+  .sidebar-item.active {
+    background: rgba(0, 229, 255, 0.1);
+    color: #00E5FF;
+    border: 1px solid rgba(0, 229, 255, 0.15);
+  }
+
+  .status-badge {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold;
+  }
+
+  .severity-critical {
+    background: rgba(255, 77, 77, 0.12);
+    color: #FF4D4D;
+    border: 1px solid rgba(255, 77, 77, 0.2);
+  }
+
+  .severity-high {
+    background: rgba(255, 184, 0, 0.12);
+    color: #FFB800;
+    border: 1px solid rgba(255, 184, 0, 0.2);
+  }
+
+  .severity-medium {
+    background: rgba(0, 229, 255, 0.12);
+    color: #00E5FF;
+    border: 1px solid rgba(0, 229, 255, 0.2);
+  }
+
+  .severity-low {
+    background: rgba(124, 255, 107, 0.12);
+    color: #7CFF6B;
+    border: 1px solid rgba(124, 255, 107, 0.2);
+  }
+
+  .metric-card {
+    @apply glass rounded-2xl p-6 neon-glow;
+  }
+
+  .metric-value {
+    @apply text-3xl font-bold tracking-tight;
+  }
+
+  .metric-label {
+    @apply text-sm font-medium text-muted mt-1;
+  }
+
+  .data-table {
+    @apply w-full text-sm;
+  }
+
+  .data-table th {
+    @apply text-left py-3 px-4 text-xs font-semibold uppercase tracking-wider text-muted border-b border-border;
+  }
+
+  .data-table td {
+    @apply py-3 px-4 border-b border-border/50;
+  }
+
+  .data-table tr:hover td {
+    background: rgba(0, 229, 255, 0.03);
+  }
+}
+
+/* Leaflet overrides for dark theme */
+.leaflet-container {
+  background: #0B1020 !important;
+}
+.leaflet-tile {
+  filter: brightness(0.4) contrast(1.2) !important;
+}
