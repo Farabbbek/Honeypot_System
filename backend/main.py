@@ -309,7 +309,7 @@ async def analyze_session(session_id: str, db: DBSession = Depends(get_db)) -> T
 
 
 @app.get("/api/threats/{report_id}/export")
-def export_threat(report_id: UUID, db: DBSession = Depends(get_db)) -> FileResponse:
+async def export_threat(report_id: UUID, db: DBSession = Depends(get_db)) -> FileResponse:
     report = db.query(ThreatReport).filter(ThreatReport.id == report_id).one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Threat report not found")
@@ -317,9 +317,8 @@ def export_threat(report_id: UUID, db: DBSession = Depends(get_db)) -> FileRespo
     events = db.query(Event).filter(Event.session_id == report.session_id).order_by(Event.timestamp).all()
     path = report.pdf_path
     if not path or not Path(path).exists():
-        path = analysis_service.pdf_exporter.export(
+        path = await analysis_service.pdf_exporter.export(
             analysis_service.model_to_dict(report),
-            analysis_service.model_to_dict(session),
             [analysis_service.model_to_dict(event) for event in events],
         )
         report.pdf_path = path

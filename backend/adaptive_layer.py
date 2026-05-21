@@ -28,8 +28,11 @@ class AdaptiveResponseLayer:
 
     def _write(self, path: str, content: str) -> None:
         target = self.honeyfs_root / path.lstrip("/")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self.logger.warning("Cannot write adaptive file %s: %s", target, exc)
 
     def _allow_login_after_bruteforce(self) -> str:
         return "ALLOW_LOGIN_AFTER_30_ATTEMPTS"
