@@ -38,8 +38,8 @@ export default function useWebSocket(demoMode = false) {
       const delay = getBackoff();
       timerRef.current = setTimeout(connect, delay);
 
-      // On reconnect, fetch last 50 events via REST to resync
-      fetch(`${API_URL}/api/alerts?limit=50`)
+      // On reconnect, fetch recent sessions via REST to resync
+      fetch(`${API_URL}/api/sessions?limit=50`)
         .then((r) => r.json())
         .then((data) => {
           if (Array.isArray(data) && handlersRef.current.has("history")) {

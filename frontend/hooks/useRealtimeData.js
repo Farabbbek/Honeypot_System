@@ -38,22 +38,12 @@ export default function useRealtimeData() {
       const delay = getBackoff();
       timerRef.current = setTimeout(connect, delay);
 
-      // On reconnect, fetch last 50 events via REST to resync
-      fetch(`${API_URL}/api/alerts?limit=50`)
+      // On reconnect, fetch recent sessions via REST to resync
+      fetch(`${API_URL}/api/sessions?limit=50`)
         .then((r) => r.json())
         .then((data) => {
           if (Array.isArray(data)) {
-            const historyAlerts = data.map((d, i) => ({
-              id: `hist-${d.session_id || i}-${i}`,
-              timestamp: d.timestamp,
-              severity: d.severity || "LOW",
-              type: d.event_type || "unknown",
-              ip: d.attacker_ip,
-              session_id: d.session_id,
-              command: d.raw_command,
-              mitreId: d.mitre_technique_id,
-            })).reverse();
-            setEvents(prev => [...prev, ...historyAlerts].slice(-200));
+            setSessions(data);
           }
         })
         .catch(() => {});

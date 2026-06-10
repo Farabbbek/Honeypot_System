@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Layout from "../components/Layout";
 import Globe3D from "../components/Globe3D";
 import { Globe } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+// Honeypot node location (Astana, Kazakhstan)
+const HONEYPOT = { lat: 51.17, lon: 71.45, city: "Astana", country: "Kazakhstan" };
 
 function SeverityBadge({ severity }) {
   const classes = {
@@ -21,37 +24,68 @@ export default function MapPage() {
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const load = useCallback(() => {
+    fetch(`${API}/api/map`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`API returned ${res.status}`);
+        return res.json();
+      })
+      .then(async (data) => {
+        let attackPoints = Array.isArray(data) ? data : (data.attacks || []);
 
-    const load = () => {
-      fetch(`${API}/api/map`)
-        .then((res) => {
-          if (!res.ok) throw new Error(`API returned ${res.status}`);
-          return res.json();
-        })
-        .then((data) => {
-          if (cancelled) return;
-          setPoints(data);
-          setLastUpdated(new Date());
-          setLoading(false);
-          setError("");
-        })
-        .catch((err) => {
-          if (cancelled) return;
-          setError(err.message || "Could not load map data");
-          setLoading(false);
-        });
-    };
+        // Fallback: if map is empty but sessions exist, use sessions + geoip
+        if (attackPoints.length === 0) {
+          try {
+            const sessRes = await fetch(`${API}/api/sessions?limit=50`);
+            const sessions = await sessRes.json();
+            if (Array.isArray(sessions) && sessions.length > 0) {
+              const uniqueIPs = [...new Set(sessions.map(s => s.attacker_ip).filter(Boolean))];
+              const geoPoints = await Promise.all(
+                uniqueIPs.map(async (ip) => {
+                  try {
+                    const geoRes = await fetch(`${API}/api/geoip/${ip}`);
+                    const geo = await geoRes.json();
+                    const session = sessions.find(s => s.attacker_ip === ip);
+                    return {
+                      session_id: session?.session_id || `geo-${ip}`,
+                      ip,
+                      latitude: geo.latitude,
+                      longitude: geo.longitude,
+                      country: geo.country_name || geo.country || "",
+                      city: geo.city || "",
+                      severity: session?.severity || "LOW",
+                      risk_score: session?.risk_score || 0,
+                      asn: geo.asn || "",
+                      org: geo.org_name || geo.org || "",
+                    };
+                  } catch {
+                    return null;
+                  }
+                })
+              );
+              attackPoints = geoPoints.filter(Boolean);
+            }
+          } catch {
+            // Keep empty
+          }
+        }
 
-    load();
-    const interval = setInterval(load, 10000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+        setPoints(attackPoints);
+        setLastUpdated(new Date());
+        setLoading(false);
+        setError("");
+      })
+      .catch((err) => {
+        setError(err.message || "Could not load map data");
+        setLoading(false);
+      });
   }, []);
+
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, 30000); // Auto-refresh every 30 seconds
+    return () => clearInterval(interval);
+  }, [load]);
 
   return (
     <Layout>
@@ -63,7 +97,7 @@ export default function MapPage() {
         <div className="flex items-center gap-3">
           {lastUpdated && (
             <span className="text-[11px] text-muted font-mono">
-              Updated {lastUpdated.toLocaleTimeString()} · auto-refresh 10s
+              Updated {lastUpdated.toLocaleTimeString()} · auto-refresh 30s
             </span>
           )}
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface border border-border">
@@ -82,11 +116,11 @@ export default function MapPage() {
                 <p className="text-danger">{error}</p>
               </div>
             ) : (
-              <Globe3D points={points} className="w-full h-full" />
+              <Globe3D points={points} honeypot={HONEYPOT} className="w-full h-full" />
             )}
           </div>
           <p className="text-xs text-muted mt-2 text-center">
-            Drag to rotate • Arcs show attack paths to honeypot node in Astana
+            Drag to rotate · Arcs show attack paths to honeypot node in Astana
           </p>
         </div>
 
@@ -95,8 +129,8 @@ export default function MapPage() {
           <div className="glass rounded-2xl p-4 neon-glow">
             <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-3">Recent Attacks</h2>
             <div className="space-y-2 max-h-[500px] overflow-y-auto">
-              {points.slice(0, 20).map((p) => (
-                <div key={p.session_id} className="flex items-center gap-2 p-2 rounded-lg bg-surface/50 border border-border hover:border-accent-cyan/20 transition-colors">
+              {points.slice(0, 20).map((p, i) => (
+                <div key={p.session_id || i} className="flex items-center gap-2 p-2 rounded-lg bg-surface/50 border border-border hover:border-accent-cyan/20 transition-colors">
                   <div
                     className="w-2 h-2 rounded-full shrink-0"
                     style={{
@@ -117,7 +151,7 @@ export default function MapPage() {
                   />
                   <div className="min-w-0">
                     <div className="font-mono text-xs text-white truncate">{p.ip}</div>
-                    <div className="text-[10px] text-muted truncate">{p.country}</div>
+                    <div className="text-[10px] text-muted truncate">{p.country || p.city}</div>
                   </div>
                   <div className="ml-auto">
                     <SeverityBadge severity={p.severity} />

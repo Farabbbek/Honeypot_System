@@ -72,6 +72,7 @@ function KpiCardWithFlash({ title, value, subtitle, color, icon, children }) {
 export default function Overview() {
   const { sessions, events, connected } = useRealtimeData();
   const [uptime, setUptime] = useState(0);
+  const [stats, setStats] = useState(null);
 
   // Uptime counter
   useEffect(() => {
@@ -79,10 +80,37 @@ export default function Overview() {
     return () => clearInterval(t);
   }, []);
 
-  // KPI calculations from live sessions
-  const totalAttacks = sessions.length;
-  const uniqueIPs = useMemo(() => new Set(sessions.map(s => s.attacker_ip)).size, [sessions]);
-  const highSeverity = sessions.filter(s => s.severity === "CRITICAL" || s.severity === "HIGH").length;
+  // Fetch /api/stats on mount
+  const fetchStats = useCallback(() => {
+    fetch(`${API}/api/stats`)
+      .then(r => r.json())
+      .then(data => setStats(data))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
+
+  // Debounced re-fetch /api/stats on any WebSocket event (1s debounce)
+  const debounceRef = useRef(null);
+  useEffect(() => {
+    if (events.length > 0) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(fetchStats, 1000);
+      return () => clearTimeout(debounceRef.current);
+    }
+  }, [events, fetchStats]);
+
+  // KPI values: prefer /api/stats, fallback to live sessions
+  const totalAttacks = stats?.total_attacks ?? sessions.length;
+  const uniqueIPs = useMemo(() => {
+    if (stats?.top_ips) return stats.top_ips.length;
+    return new Set(sessions.map(s => s.attacker_ip)).size;
+  }, [stats, sessions]);
+  const highSeverity = stats?.top_tactics
+    ? sessions.filter(s => s.severity === "CRITICAL" || s.severity === "HIGH").length
+    : sessions.filter(s => s.severity === "CRITICAL" || s.severity === "HIGH").length;
   const activeAttackers = sessions.filter(s => !s._closing).length;
 
   // Top attackers from live sessions
