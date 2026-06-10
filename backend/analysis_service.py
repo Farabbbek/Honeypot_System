@@ -10,6 +10,7 @@ Eliminates code duplication for:
 """
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -86,9 +87,16 @@ class AnalysisService:
         db.add(report)
         db.commit()
         db.refresh(report)
+        logger.info(
+            "ThreatReport saved for session %s: attack_type=%s severity=%s confidence=%s",
+            session_id,
+            report.attack_type,
+            report.severity,
+            report.confidence,
+        )
 
         try:
-            path = self.pdf_exporter.export(
+            path = await self._export_pdf(
                 self.model_to_dict(report),
                 self.model_to_dict(session),
                 [self.model_to_dict(event) for event in events],
@@ -125,20 +133,31 @@ class AnalysisService:
 
         if intel:
             if not ioc.get("country") or str(ioc.get("country")).lower() in {"unknown", "n/a"}:
-                ioc["country"] = intel.country_name
+                ioc["country"] = self._intel_value(intel, "country_name")
             if not ioc.get("city") or str(ioc.get("city")).lower() in {"unknown", "n/a"}:
-                ioc["city"] = intel.city
+                ioc["city"] = self._intel_value(intel, "city")
             if not ioc.get("asn"):
-                ioc["asn"] = intel.asn
+                ioc["asn"] = self._intel_value(intel, "asn")
             if not ioc.get("org"):
-                ioc["org"] = intel.org_name
+                ioc["org"] = self._intel_value(intel, "org_name")
             if not ioc.get("country_code"):
-                ioc["country_code"] = intel.country_code
-            if ioc.get("abuse_score") in {None, "unknown", "n/a"} and intel.abuse_confidence_score is not None:
-                ioc["abuse_score"] = intel.abuse_confidence_score
+                ioc["country_code"] = self._intel_value(intel, "country_code")
+            abuse_score = self._intel_value(intel, "abuse_confidence_score")
+            if ioc.get("abuse_score") in {None, "unknown", "n/a"} and abuse_score is not None:
+                ioc["abuse_score"] = abuse_score
 
         report_payload["ioc"] = ioc
         return report_payload
+
+    async def _export_pdf(self, report: dict[str, Any], session: dict[str, Any], events: list[dict[str, Any]]) -> str:
+        if inspect.iscoroutinefunction(self.pdf_exporter.export):
+            return await self.pdf_exporter.export(report, session, events)
+        return await asyncio.to_thread(self.pdf_exporter.export, report, session, events)
+
+    def _intel_value(self, intel: Any, field: str) -> Any:
+        if isinstance(intel, dict):
+            return intel.get(field)
+        return getattr(intel, field, None)
 
     def _resolve_severity(self, report_severity: str | None, session_severity: str | None) -> str:
         rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
@@ -148,4 +167,6 @@ class AnalysisService:
         return resolved if resolved in rank else "LOW"
 
     def model_to_dict(self, model: Any) -> dict[str, Any]:
+        if isinstance(model, dict):
+            return model
         return {column.name: getattr(model, column.name) for column in model.__table__.columns}

@@ -1,22 +1,25 @@
 import shlex
-from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 
 class BehaviorEngine:
     TACTIC_WEIGHTS = {
+        "UNKNOWN": 0,
+        "LOGIN_FAILED": 0,
         "BRUTE_FORCE": 25,
         "RECONNAISSANCE": 15,
-        "MALWARE_DEPLOYMENT": 35,
-        "CREDENTIAL_ACCESS": 30,
-        "PERSISTENCE": 30,
-        "EXFILTRATION": 40,
-        "DEFENSE_EVASION": 25,
-        "EXECUTION": 30,
         "DISCOVERY": 10,
-        "LATERAL_MOVEMENT": 30,
         "INITIAL_ACCESS": 20,
+        "CREDENTIAL_ACCESS": 30,
+        "EXECUTION": 30,
+        "PERSISTENCE": 30,
+        "DEFENSE_EVASION": 25,
+        "LATERAL_MOVEMENT": 30,
+        "COMMAND_AND_CONTROL": 25,
+        "EXFILTRATION": 40,
+        "IMPACT": 35,
+        "MALWARE_DEPLOYMENT": 35,
     }
 
     # Non-command events → MITRE mapping
@@ -39,10 +42,16 @@ class BehaviorEngine:
         "session.file_download": ("T1105", "Command and Control", "Ingress Tool Transfer"),
         "cowrie.session.file_upload": ("T1041", "Exfiltration", "Exfiltration Over C2 Channel"),
         "session.file_upload": ("T1041", "Exfiltration", "Exfiltration Over C2 Channel"),
+        "cowrie.command.success": ("T1059.004", "Execution", "Unix Shell"),
+        "command.success": ("T1059.004", "Execution", "Unix Shell"),
         "cowrie.command.failed": ("T1059", "Execution", "Command and Scripting Interpreter"),
         "command.failed": ("T1059", "Execution", "Command and Scripting Interpreter"),
-        "cowrie.session.closed": ("T1506", "Defense Evasion", "Session Termination"),
-        "session.closed": ("T1506", "Defense Evasion", "Session Termination"),
+        "cowrie.env.request": ("T1082", "Discovery", "System Information Discovery"),
+        "env.request": ("T1082", "Discovery", "System Information Discovery"),
+        "cowrie.ttyvars.request": ("T1082", "Discovery", "Terminal/TTY Discovery"),
+        "ttyvars.request": ("T1082", "Discovery", "Terminal/TTY Discovery"),
+        "cowrie.session.closed": ("T1562", "Defense Evasion", "Impair Defenses"),
+        "session.closed": ("T1562", "Defense Evasion", "Impair Defenses"),
         "cowrie.log.closed": ("T1562", "Defense Evasion", "Impair Defenses - Log Manipulation"),
         "log.closed": ("T1562", "Defense Evasion", "Impair Defenses - Log Manipulation"),
         "cowrie.direct-tcpip.request": ("T1021", "Lateral Movement", "Remote Services"),
@@ -60,8 +69,32 @@ class BehaviorEngine:
 
         if executable in {"wget", "curl"}:
             return self._result("T1105", "Command and Control", "Ingress Tool Transfer")
-        if executable == "chmod" and "+x" in tokens[1:]:
-            return self._result("T1059.004", "Execution", "Command and Scripting Interpreter")
+        if executable == "base64":
+            return self._result("T1027", "Defense Evasion", "Obfuscated Files or Information")
+        if executable in {"iptables", "ufw"}:
+            return self._result("T1562.004", "Defense Evasion", "Disable or Modify System Firewall")
+        if executable == "passwd":
+            return self._result("T1098", "Persistence", "Account Manipulation")
+        if executable in {"nc", "netcat", "ncat"}:
+            return self._result("T1059.004", "Command and Control", "Unix Shell Reverse Shell")
+        if executable in {"python3", "python"} and "-c" in tokens[1:]:
+            return self._result("T1059.006", "Execution", "Python Script Execution")
+        if executable in {"export", "env"}:
+            return self._result("T1082", "Discovery", "Environment Variable Enumeration")
+        if executable in {"kill", "pkill"}:
+            return self._result("T1489", "Impact", "Service Stop")
+        if executable in {"dd", "mkfs"}:
+            return self._result("T1485", "Impact", "Data Destruction")
+        if executable == "chmod":
+            if "+x" in tokens[1:]:
+                return self._result("T1059.004", "Execution", 
+                                   "Command and Scripting Interpreter: Unix Shell")
+            if "+777" in tokens[1:] or "777" in tokens[1:] or "a+x" in tokens[1:]:
+                return self._result("T1222", "Defense Evasion", 
+                                   "File and Directory Permissions Modification")
+            # Any other chmod
+            return self._result("T1222", "Defense Evasion",
+                                "File and Directory Permissions Modification")
         if executable == "cat" and any(target in tokens[1:] for target in {"/etc/passwd", "/etc/shadow"}):
             return self._result("T1003", "Credential Access", "OS Credential Dumping")
         if executable in {"useradd", "adduser"}:
@@ -74,7 +107,7 @@ class BehaviorEngine:
             return self._result("T1070", "Defense Evasion", "Indicator Removal")
         if executable in {"ssh", "telnet"}:
             return self._result("T1021", "Lateral Movement", "Remote Services")
-        if executable in {"python", "perl", "bash"} and "-c" in tokens[1:]:
+        if executable in {"perl", "bash"} and "-c" in tokens[1:]:
             return self._result("T1059", "Execution", "Command and Scripting Interpreter")
         if executable in {"rm", "shred"}:
             return self._result("T1485", "Impact", "Data Destruction")
@@ -97,16 +130,27 @@ class BehaviorEngine:
         event_type = event.get("event_type") or event.get("eventid") or ""
         command = event.get("command") or event.get("input") or event.get("raw_command") or ""
 
-        # Check non-command event types first
+        # Login events
+        if event_type in {"cowrie.login.failed", "login.failed"}:
+            failed_logins = list(recent_failed_logins or [])
+            timestamp = event.get("timestamp")
+            if timestamp and timestamp not in failed_logins:
+                failed_logins.append(timestamp)
+
+            intensity = self.brute_force_intensity(failed_logins)
+            if intensity:
+                result = self._tactic("BRUTE_FORCE", "T1110.001", "Credential Access", "Brute Force: Password Guessing")
+                result["internal_tactic"] = "BRUTE_FORCE"
+                if intensity == "HEAVY":
+                    result["risk_score"] = 35
+                result["brute_force_intensity"] = intensity
+                return result
+            return self._tactic("LOGIN_FAILED", "T1110.001", "Credential Access", "Failed Login Attempt")
+
+        # Check non-command event types after login.failed so brute force can be detected.
         if event_type in self.EVENT_MITRE:
             technique_id, tactic, description = self.EVENT_MITRE[event_type]
             return self._result_full(technique_id, tactic, description, self._tactic_weight(tactic))
-
-        # Login events
-        if event_type in {"cowrie.login.failed", "login.failed"}:
-            if self.is_brute_force(recent_failed_logins or []):
-                return self._tactic("BRUTE_FORCE", "T1110.001", "Credential Access", "Password Guessing")
-            return self._tactic("LOGIN_FAILED", "T1110.001", "Credential Access", "Failed Login")
 
         # Command events — use command classification
         if event_type in {"cowrie.command.input", "command.input"}:
@@ -126,25 +170,36 @@ class BehaviorEngine:
             return "UNKNOWN"
 
         executable = tokens[0]
-        if executable in {"nmap", "ifconfig", "netstat", "uname", "hostname", "whoami", "id", "ps", "top", "ls", "pwd", "cd", "echo", "mkdir"}:
+        if executable in {"nmap", "ifconfig", "netstat"}:
             return "RECONNAISSANCE"
+        if executable in {"uname", "hostname", "whoami", "id", "ps", "top", "ls", "pwd", "cd", "echo", "mkdir", "export", "env"}:
+            return "DISCOVERY"
         if executable in {"wget", "curl"} or (executable == "chmod" and "+x" in tokens[1:]) or command.startswith("./"):
             return "MALWARE_DEPLOYMENT"
+        if executable in {"nc", "netcat", "ncat"}:
+            return "COMMAND_AND_CONTROL"
         if executable == "cat" and any(target in tokens[1:] for target in {"/etc/passwd", "/etc/shadow"}):
             return "CREDENTIAL_ACCESS"
-        if executable in {"crontab"} or "systemctl enable" in command or "~/.bashrc" in command:
+        if executable in {"passwd", "crontab"} or "systemctl enable" in command or "~/.bashrc" in command:
             return "PERSISTENCE"
+        if executable in {"base64", "iptables", "ufw", "history"}:
+            return "DEFENSE_EVASION"
+        if executable in {"ssh", "telnet"}:
+            return "LATERAL_MOVEMENT"
         if executable in {"tar", "zip", "scp", "rsync"}:
             return "EXFILTRATION"
-        if executable in {"python", "perl", "bash"} and "-c" in tokens[1:]:
+        if executable in {"python3", "python", "perl", "bash"} and "-c" in tokens[1:]:
             return "EXECUTION"
         if executable in {"cat", "head", "tail", "less", "more"}:
             return "DISCOVERY"
+        if executable in {"kill", "pkill", "dd", "mkfs", "rm", "shred"}:
+            return "IMPACT"
         return "UNKNOWN"
 
     def build_session_profile(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         history = []
         failed_logins = []
+        risk_by_tactic: dict[str, int] = {}
 
         for event in events:
             timestamp = event.get("timestamp") or datetime.now(UTC)
@@ -155,6 +210,7 @@ class BehaviorEngine:
             classified = self.classify_event(event, failed_logins)
             tactic = classified.get("tactic")
             if tactic and tactic != "UNKNOWN":
+                risk_by_tactic[tactic] = max(risk_by_tactic.get(tactic, 0), classified.get("risk_score", 0))
                 history.append(
                     {
                         "tactic": tactic,
@@ -163,8 +219,7 @@ class BehaviorEngine:
                     }
                 )
 
-        tactic_counts = Counter(item["tactic"] for item in history)
-        risk_score = min(100, sum(self.TACTIC_WEIGHTS.get(tactic, 0) for tactic in tactic_counts))
+        risk_score = min(100, sum(risk_by_tactic.values()))
         current_tactic = history[-1]["tactic"] if history else None
         return {
             "current_tactic": current_tactic,
@@ -174,11 +229,19 @@ class BehaviorEngine:
         }
 
     def is_brute_force(self, failed_login_times: list[datetime]) -> bool:
-        if len(failed_login_times) < 3:
-            return False
+        return self.brute_force_intensity(failed_login_times) is not None
+
+    def brute_force_intensity(self, failed_login_times: list[datetime]) -> str | None:
+        if len(failed_login_times) < 10:
+            return None
         latest = max(failed_login_times)
         window_start = latest - timedelta(minutes=1)
-        return sum(1 for item in failed_login_times if item >= window_start) > 2
+        attempts = sum(1 for item in failed_login_times if item >= window_start)
+        if attempts >= 20:
+            return "HEAVY"
+        if attempts >= 10:
+            return "LIGHT"
+        return None
 
     def severity_from_score(self, risk_score: int) -> str:
         if risk_score >= 85:
@@ -190,7 +253,7 @@ class BehaviorEngine:
         return "LOW"
 
     def _tactic_weight(self, tactic: str) -> int:
-        return self.TACTIC_WEIGHTS.get(tactic, 0)
+        return self.TACTIC_WEIGHTS.get(self._internal_tactic(tactic), 0)
 
     def _tokenize(self, command: str) -> list[str]:
         try:
@@ -199,29 +262,37 @@ class BehaviorEngine:
             return command.split()
 
     def _result(self, technique_id: str, tactic: str, description: str) -> dict[str, str]:
+        internal_tactic = self._internal_tactic(tactic)
         return {
             "mitre_technique_id": technique_id,
             "mitre_tactic": tactic,
+            "internal_tactic": internal_tactic,
             "description": description,
         }
 
     def _result_full(self, technique_id: str, mitre_tactic: str, description: str, risk_score: int) -> dict[str, Any]:
+        tactic = self._internal_tactic(mitre_tactic)
         return {
             "mitre_technique_id": technique_id,
             "mitre_tactic": mitre_tactic,
             "description": description,
-            "tactic": mitre_tactic.upper().replace(" ", "_"),
+            "tactic": tactic,
+            "internal_tactic": tactic,
             "risk_score": risk_score,
         }
 
     def _tactic(self, tactic: str, technique_id: str, mitre_tactic: str, description: str) -> dict[str, Any]:
         return {
             "tactic": tactic,
+            "internal_tactic": tactic,
             "mitre_technique_id": technique_id,
             "mitre_tactic": mitre_tactic,
             "description": description,
             "risk_score": self.TACTIC_WEIGHTS.get(tactic, 0),
         }
+
+    def _internal_tactic(self, mitre_tactic: str) -> str:
+        return mitre_tactic.upper().replace(" ", "_").replace("-", "_")
 
     def _unknown(self) -> dict[str, str]:
         return {

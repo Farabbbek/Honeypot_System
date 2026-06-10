@@ -21,7 +21,7 @@ class IPEnrichmentService:
         if self.is_private_ip(ip):
             data = {
                 "ip": ip,
-                "country_code": "LOCAL",
+                "country_code": "LAN",
                 "country_name": "Private Network",
                 "city": "Local",
                 "latitude": None,

@@ -157,7 +157,8 @@ class CowrieCollector:
                 report = await self.analysis_service.analyze_and_report(session, events, intel, db)
 
                 # Clear the pending marker
-                session.adaptation_applied = None if session.adaptation_applied == PENDING_ANALYSIS_MARKER else session.adaptation_applied
+                if session.adaptation_applied == PENDING_ANALYSIS_MARKER:
+                    session.adaptation_applied = None
                 db.commit()
 
                 logger.info("Analysis complete for session %s (severity=%s)", session_id, report.severity)
@@ -217,6 +218,13 @@ class CowrieCollector:
         if tactic and tactic not in {"UNKNOWN", "LOGIN_FAILED"}:
             self.update_session_profile(session, tactic, classified, event["timestamp"])
 
+        event["mitre_technique_id"] = classified.get("mitre_technique_id")
+        event["mitre_tactic"] = classified.get("mitre_tactic")
+        event["tactic"] = classified.get("tactic")
+        event["risk_score"] = session.risk_score
+        event["severity"] = session.severity
+        event["duration_seconds"] = getattr(session, "duration_seconds", 0)
+
     def upsert_session(self, db: DBSession, event: dict[str, Any]) -> Session:
         session_id = event["session_id"]
         now = event["timestamp"]
@@ -232,13 +240,43 @@ class CowrieCollector:
             if session:
                 return session
 
+        # Check SQLAlchemy identity map for a session added earlier in this batch before flush.
+        for obj in db.new:
+            if isinstance(obj, Session) and obj.session_id == session_id:
+                return obj
+
         session = Session(session_id=session_id, attacker_ip=event["attacker_ip"], start_time=now)
         db.add(session)
         db.flush()
+
+        # Broadcast session.new into Redis stream so that main.py can forward it to WebSocket clients.
+        # This runs outside the DB session to avoid holding the connection open.
+        asyncio.create_task(self._broadcast_new_session(session, event["attacker_ip"]))
         return session
 
+    async def _broadcast_new_session(self, session: Session, attacker_ip: str) -> None:
+        """Push a session.new event to Redis for WebSocket broadcast."""
+        try:
+            client = redis.from_url(self.redis_url, decode_responses=True)
+            payload = json.dumps({
+                "type": "session.new",
+                "data": {
+                    "session_id": session.session_id,
+                    "attacker_ip": attacker_ip,
+                    "start_time": session.start_time.isoformat(),
+                    "risk_score": 0,
+                    "severity": "LOW",
+                    "current_tactic": None,
+                    "login_attempts": 0,
+                }
+            }, default=str)
+            await client.xadd(self.stream_name, {"event": payload}, maxlen=10000)
+            await client.aclose()
+        except Exception as exc:
+            logger.warning("Failed to broadcast session.new: %s", exc)
+
     def recent_failed_login_times(self, db: DBSession, session_id: str) -> list[datetime]:
-        since = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
+        since = datetime.utcnow() - timedelta(minutes=1)
         rows = (
             db.query(Event.timestamp)
             .filter(Event.session_id == session_id)

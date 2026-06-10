@@ -30,6 +30,8 @@ Commands executed:
 {commands_with_timestamps}
 
 Downloaded files: {downloaded_files}
+Risk score (BehaviorEngine): {risk_score}/100
+Severity (BehaviorEngine): {severity}
 
 Return JSON:
 {{
@@ -118,17 +120,21 @@ class LLMAgent:
             tactics_list=json.dumps(tactics, default=str),
             commands_with_timestamps=commands or "No commands executed.",
             downloaded_files=json.dumps(downloaded_files, default=str),
+            risk_score=session.get("risk_score") or 0,
+            severity=session.get("severity") or "LOW",
         )
 
     def fallback_report(self, session: dict[str, Any], events: list[dict[str, Any]], ip_intel: dict[str, Any] | None) -> dict[str, Any]:
+        technique_ids = {
+            self.event_technique_id(event)
+            for event in events
+        }
         techniques = [
             {"id": technique_id, "name": self.technique_name(technique_id)}
             for technique_id in sorted(
-                {
-                    event.get("mitre_technique")
-                    for event in events
-                    if event.get("mitre_technique") and event.get("mitre_technique") != "unknown"
-                }
+                technique_id
+                for technique_id in technique_ids
+                if technique_id and technique_id.lower() not in {"unknown", "tbd"}
             )
         ]
         commands = [event.get("raw_command") for event in events if event.get("raw_command")]
@@ -203,16 +209,16 @@ class LLMAgent:
         return "\n".join(lines)
 
     def downloaded_files(self, events: list[dict[str, Any]]) -> list[str]:
-        downloads = []
+        downloads = set()
         for event in events:
             data = event.get("event_data") or {}
             url = data.get("url") or data.get("outfile") or data.get("shasum")
             if event.get("event_type") in {"cowrie.session.file_download", "cowrie.command.input"} and url:
-                downloads.append(str(url))
+                downloads.add(str(url))
             command = event.get("raw_command") or ""
             if command.startswith(("wget ", "curl ")):
-                downloads.append(command)
-        return downloads
+                downloads.add(command)
+        return sorted(downloads)
 
     def build_timeline(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         timeline: list[dict[str, Any]] = []
@@ -221,27 +227,41 @@ class LLMAgent:
                 "timestamp": event.get("timestamp"),
                 "event": event.get("event_type"),
                 "command": event.get("raw_command"),
-                "mitre": event.get("mitre_technique"),
+                "mitre": self.event_technique_id(event),
             }
             if entry["timestamp"] or entry["event"] or entry["command"]:
                 timeline.append(entry)
         return timeline
 
+    def event_technique_id(self, event: dict[str, Any]) -> str | None:
+        return event.get("mitre_technique_id") or event.get("mitre_technique")
+
     def technique_name(self, technique_id: str) -> str:
         names = {
             "T1003": "OS Credential Dumping",
+            "T1005": "Data from Local System",
             "T1021": "Remote Services",
+            "T1027": "Obfuscated Files or Information",
             "T1033": "System Owner/User Discovery",
             "T1041": "Exfiltration Over C2 Channel",
+            "T1046": "Network Service Discovery",
             "T1053": "Scheduled Task/Job",
             "T1057": "Process Discovery",
             "T1059": "Command and Scripting Interpreter",
             "T1059.004": "Unix Shell",
+            "T1059.006": "Command and Scripting Interpreter: Python",
             "T1070": "Indicator Removal",
+            "T1078": "Valid Accounts",
             "T1082": "System Information Discovery",
+            "T1098": "Account Manipulation",
             "T1105": "Ingress Tool Transfer",
             "T1110.001": "Password Guessing",
             "T1136": "Create Account",
+            "T1485": "Data Destruction",
+            "T1489": "Service Stop",
+            "T1222": "File and Directory Permissions Modification",
+            "T1562": "Impair Defenses",
+            "T1562.004": "Disable or Modify System Firewall",
             "T1566": "Phishing",
         }
         return names.get(technique_id, "Unknown Technique")
@@ -264,5 +284,5 @@ class LLMAgent:
 
     def _model_name(self) -> str:
         if self.provider == "deepseek":
-            return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+            return os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
         return os.getenv("OPENAI_MODEL", "gpt-4o-mini")

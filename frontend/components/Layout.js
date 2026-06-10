@@ -105,7 +105,7 @@ export default function Layout({ children }) {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 p-4 lg:p-8 overflow-y-auto">
+        <main className="flex-1 p-4 lg:p-8 overflow-y-hidden">
           {children}
         </main>
       </div>

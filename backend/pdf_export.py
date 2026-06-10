@@ -189,8 +189,8 @@ class PDFExporter:
     def __init__(self, output_dir="/app/reports"):
         self.output_dir = output_dir
 
-    async def export(self, report, events=None):
-        return await generate_and_save(report, self.output_dir, events)
+    async def export(self, report_dict, session_dict, events_list=None):
+        return await generate_and_save(report_dict, session_dict, self.output_dir, events_list)
 
 
 async def generate_pdf(report, events=None):
@@ -198,12 +198,24 @@ async def generate_pdf(report, events=None):
     return HTML(string=html).write_pdf()
 
 
-async def generate_and_save(report, output_dir="/app/reports", events=None):
+async def generate_and_save(report_dict, session_dict, output_dir="/app/reports", events_list=None):
     os.makedirs(output_dir, exist_ok=True)
-    session_id = report.get("session_id", "unknown")
-    pdf_bytes = await generate_pdf(report, events)
-    filename = f"incident_{session_id}.pdf"
+    
+    date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    raw_ip = session_dict.get("attacker_ip") or "unknown"
+    safe_ip = raw_ip.replace(".", "-").replace(":", "-")
+    
+    tactic = (
+        session_dict.get("current_tactic")
+        or report_dict.get("attack_type", "UNKNOWN")
+    ).upper().replace(" ", "_").replace("-", "_")[:30]
+    
+    severity = (report_dict.get("severity") or "LOW").upper()
+    
+    filename = f"threat_report_{date_str}_{safe_ip}_{tactic}_{severity}.pdf"
     filepath = os.path.join(output_dir, filename)
+    
+    pdf_bytes = await generate_pdf(report_dict, events_list)
     with open(filepath, "wb") as f:
         f.write(pdf_bytes)
     logger.info("PDF report saved to %s", filepath)

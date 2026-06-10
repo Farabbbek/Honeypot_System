@@ -29,7 +29,11 @@ app = FastAPI(title="Adaptive Honeypot API", version="0.1.0")
 logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://159.89.103.231:3001",
+        "http://159.89.103.231",
+        "http://localhost:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -112,16 +116,39 @@ async def _redis_stream_consumer() -> None:
                             continue
 
                         alert = {
-                            "type": "attack_alert",
-                            "session_id": event.get("session_id", "unknown"),
-                            "timestamp": str(event.get("timestamp", "")),
-                            "severity": event.get("severity", "LOW"),
-                            "ip": event.get("attacker_ip", "0.0.0.0"),
-                            "event_type": event.get("event_type", "unknown"),
-                            "message": event.get("raw_command", ""),
-                            "attack_type": event.get("mitre_technique", "UNKNOWN"),
+                            "type": "event",
+                            "data": {
+                                "session_id": event.get("session_id", "unknown"),
+                                "event_type": event.get("event_type", "unknown"),
+                                "raw_command": event.get("raw_command"),
+                                "mitre_technique_id": event.get("mitre_technique_id"),
+                                "mitre_tactic": event.get("mitre_tactic"),
+                                "tactic": event.get("tactic"),
+                                "risk_score": event.get("risk_score", 0),
+                                "attacker_ip": event.get("attacker_ip", "0.0.0.0"),
+                                "timestamp": str(event.get("timestamp", "")),
+                                "severity": event.get("severity", "LOW"),
+                            }
                         }
                         await manager.broadcast(alert)
+
+                        if event.get("event_type") in {"cowrie.session.closed", "session.closed"}:
+                            await manager.broadcast({
+                                "type": "session.closed",
+                                "data": {
+                                    "session_id": event.get("session_id", "unknown"),
+                                    "severity": event.get("severity", "LOW"),
+                                    "risk_score": event.get("risk_score", 0),
+                                    "duration_seconds": event.get("duration_seconds", 0),
+                                    "attacker_ip": event.get("attacker_ip", "0.0.0.0"),
+                                }
+                            })
+                            continue
+
+                        # Check for session.new — comes as a JSON-encoded payload from collector
+                        if event.get("type") == "session.new":
+                            await manager.broadcast(event)
+                            continue
 
         except asyncio.CancelledError:
             break
@@ -139,9 +166,63 @@ def health() -> dict[str, str]:
 
 # ─── WebSocket Alerts ───
 @app.websocket("/ws/alerts")
-async def websocket_alerts(websocket: WebSocket) -> None:
+async def websocket_alerts(websocket: WebSocket, db: DBSession = Depends(get_db)) -> None:
     await manager.connect(websocket)
     try:
+        # Fetch last 50 events
+        events = (
+            db.query(Event, Session)
+            .join(Session, Event.session_id == Session.session_id)
+            .order_by(desc(Event.timestamp))
+            .limit(50)
+            .all()
+        )
+        
+        history_events = []
+        for ev, sess in events:
+            history_events.append({
+                "session_id": ev.session_id,
+                "event_type": ev.event_type,
+                "raw_command": ev.raw_command,
+                "mitre_technique_id": ev.mitre_technique,
+                "mitre_tactic": ev.mitre_tactic,
+                "tactic": sess.current_tactic,
+                "risk_score": sess.risk_score,
+                "attacker_ip": sess.attacker_ip,
+                "timestamp": ev.timestamp.isoformat(),
+                "severity": sess.severity,
+            })
+        
+        # Fetch all active sessions (end_time IS NULL)
+        active_sessions = (
+            db.query(Session)
+            .filter(Session.end_time.is_(None))
+            .order_by(desc(Session.start_time))
+            .limit(50)
+            .all()
+        )
+        
+        history_sessions = []
+        for s in active_sessions:
+            history_sessions.append({
+                "session_id": s.session_id,
+                "attacker_ip": s.attacker_ip,
+                "start_time": s.start_time.isoformat() if s.start_time else None,
+                "risk_score": s.risk_score,
+                "severity": s.severity,
+                "current_tactic": s.current_tactic,
+                "login_attempts": s.login_attempts,
+                "duration_seconds": s.duration_seconds,
+            })
+            
+        await websocket.send_json({
+            "type": "history",
+            "data": {
+                "events": history_events,
+                "sessions": history_sessions,
+            }
+        })
+        
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
@@ -319,11 +400,15 @@ async def export_threat(report_id: UUID, db: DBSession = Depends(get_db)) -> Fil
     if not path or not Path(path).exists():
         path = await analysis_service.pdf_exporter.export(
             analysis_service.model_to_dict(report),
+            analysis_service.model_to_dict(session),
             [analysis_service.model_to_dict(event) for event in events],
         )
         report.pdf_path = path
         db.commit()
-    return FileResponse(path, media_type="application/pdf", filename=Path(path).name)
+        
+    filename = Path(path).name
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return FileResponse(path, media_type="application/pdf", filename=filename, headers=headers)
 
 
 @app.post("/api/threats/{report_id}/notify")

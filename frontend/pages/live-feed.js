@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import Layout from "../components/Layout";
 import ThreatFeed from "../components/ThreatFeed";
-import { Activity, ArrowRight } from "lucide-react";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import useRealtimeData from "../hooks/useRealtimeData";
+import { Activity, ArrowRight, RefreshCw } from "lucide-react";
 
 function SeverityBadge({ severity }) {
   const classes = {
@@ -16,18 +15,54 @@ function SeverityBadge({ severity }) {
   return <span className={`status-badge ${classes[severity] || "severity-low"}`}>{severity}</span>;
 }
 
-export default function LiveFeed() {
-  const [sessions, setSessions] = useState([]);
-  const [loading, setLoading] = useState(true);
+const severityDotColor = (sev) => {
+  switch (sev) {
+    case "CRITICAL": return "#FF4D4D";
+    case "HIGH": return "#FFB800";
+    case "MEDIUM": return "#F59E0B";
+    default: return "#00E5FF";
+  }
+};
 
+const severityDotShadow = (sev) => {
+  switch (sev) {
+    case "CRITICAL": return "rgba(255,77,77,0.5)";
+    case "HIGH": return "rgba(255,184,0,0.5)";
+    case "MEDIUM": return "rgba(245,158,11,0.5)";
+    default: return "rgba(0,229,255,0.5)";
+  }
+};
+
+export default function LiveFeed() {
+  const { events, sessions, connected, reconnecting } = useRealtimeData();
+  const [alerts, setAlerts] = useState([]);
+  const [eventsPerMin, setEventsPerMin] = useState(0);
+  const timestampsRef = useRef([]);
+
+  // Keep a fixed alerts array from events for the ThreatFeed display
   useEffect(() => {
-    fetch(`${API}/api/sessions?limit=10`)
-      .then((r) => r.json())
-      .then((data) => {
-        setSessions(data);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    setAlerts(events);
+  }, [events]);
+
+  // Track event arrival times for Events/min
+  useEffect(() => {
+    if (events.length > 0) {
+      timestampsRef.current.push(Date.now());
+      // Keep last 200 entries
+      if (timestampsRef.current.length > 200) {
+        timestampsRef.current = timestampsRef.current.slice(-200);
+      }
+    }
+  }, [events.length]);
+
+  // Recalculate Events/min every 10 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      timestampsRef.current = timestampsRef.current.filter(t => now - t < 60000);
+      setEventsPerMin(timestampsRef.current.length);
+    }, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -48,7 +83,12 @@ export default function LiveFeed() {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Threat Feed */}
         <div className="xl:col-span-2">
-          <ThreatFeed demoMode={sessions.length === 0} maxAlerts={40} />
+          <ThreatFeed
+            alerts={alerts}
+            connected={connected}
+            reconnecting={reconnecting}
+            maxAlerts={200}
+          />
         </div>
 
         {/* Side: Active Sessions */}
@@ -57,27 +97,31 @@ export default function LiveFeed() {
             <div className="flex items-center gap-2 mb-4">
               <Activity className="w-4 h-4 text-accent-cyan" />
               <h2 className="text-sm font-bold text-white uppercase tracking-wider">Active Sessions</h2>
+              {reconnecting && (
+                <RefreshCw className="w-3 h-3 text-warning animate-spin ml-auto" />
+              )}
             </div>
 
-            {loading ? (
-              <div className="text-center py-6 text-muted text-sm">Loading...</div>
-            ) : sessions.length === 0 ? (
+            {sessions.length === 0 ? (
               <div className="text-center py-6 text-muted text-sm">No active sessions</div>
             ) : (
               <div className="space-y-2">
                 {sessions.map((s) => (
                   <Link key={s.session_id} href={`/sessions/${s.session_id}`}>
-                    <div className="flex items-center gap-3 p-2.5 rounded-lg bg-surface/50 border border-border hover:border-accent-cyan/20 transition-all group">
+                    <div
+                      className={`flex items-center gap-3 p-2.5 rounded-lg bg-surface/50 border border-border hover:border-accent-cyan/20 transition-all group ${
+                        s._new ? "session-fade-in" : ""
+                      } ${s._closing ? "session-fade-out" : ""}`}
+                      style={{
+                        opacity: s._closing ? 0 : undefined,
+                        transform: s._closing ? 'translateY(-10px)' : undefined,
+                      }}
+                    >
                       <div
                         className="w-2 h-2 rounded-full shrink-0"
                         style={{
-                          background:
-                            s.severity === "CRITICAL" ? "#FF4D4D" :
-                            s.severity === "HIGH" ? "#FFB800" : "#00E5FF",
-                          boxShadow: `0 0 6px ${
-                            s.severity === "CRITICAL" ? "rgba(255,77,77,0.5)" :
-                            s.severity === "HIGH" ? "rgba(255,184,0,0.5)" : "rgba(0,229,255,0.5)"
-                          }`,
+                          background: severityDotColor(s.severity),
+                          boxShadow: `0 0 6px ${severityDotShadow(s.severity)}`,
                         }}
                       />
                       <div className="min-w-0 flex-1">
@@ -96,13 +140,16 @@ export default function LiveFeed() {
             )}
           </div>
 
-          {/* Quick stats */}
+          {/* Feed Stats */}
           <div className="glass rounded-2xl p-4 neon-glow">
             <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-3">Feed Stats</h2>
             <div className="space-y-2 text-xs font-mono">
               <div className="flex justify-between">
                 <span className="text-muted">WebSocket</span>
-                <span className="text-success">Connected</span>
+                <span className={`flex items-center gap-1 ${connected ? "text-success" : reconnecting ? "text-warning" : "text-danger"}`}>
+                  {reconnecting && <RefreshCw className="w-3 h-3 animate-spin" />}
+                  {connected ? "Connected" : reconnecting ? "Reconnecting..." : "Disconnected"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">Refresh Rate</span>
@@ -110,7 +157,11 @@ export default function LiveFeed() {
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">Buffer Size</span>
-                <span className="text-white">50 alerts</span>
+                <span className="text-white">{alerts.length} alerts</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Events/min</span>
+                <span className="text-accent-cyan">{eventsPerMin}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">Auto-scroll</span>
@@ -120,6 +171,24 @@ export default function LiveFeed() {
           </div>
         </div>
       </div>
+
+      {/* Animations */}
+      <style jsx>{`
+        @keyframes fadeInSlide {
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeOutSlide {
+          from { opacity: 1; transform: translateY(0); }
+          to { opacity: 0; transform: translateY(-10px); }
+        }
+        :global(.session-fade-in) {
+          animation: fadeInSlide 0.4s ease-out forwards;
+        }
+        :global(.session-fade-out) {
+          animation: fadeOutSlide 0.35s ease-in forwards;
+        }
+      `}</style>
     </Layout>
   );
 }

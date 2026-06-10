@@ -1,0 +1,23 @@
+services:
+  postgres:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  collector:
+    healthcheck:
+      disable: true
+
+  frontend:
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws/alerts
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws/alerts
+
+  nginx:
+    profiles:
+      - production
