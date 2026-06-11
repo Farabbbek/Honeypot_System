@@ -75,32 +75,42 @@ STREAM_NAME = os.getenv("REDIS_STREAM", "cowrie:events")
 
 @app.on_event("startup")
 async def startup() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     Base.metadata.create_all(bind=engine)
-    # Start Redis consumer in background
-    """Background task: read from Redis stream and broadcast via WebSocket."""
     if HAS_REDIS:
-        asyncio.create_task(_redis_stream_consumer())
+        app.state.redis_task = asyncio.create_task(_redis_stream_consumer())
     else:
         logger.info("Redis not installed — skipping stream consumer. WebSocket will only get manual broadcasts.")
 
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    task = getattr(app.state, "redis_task", None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 
 async def _redis_stream_consumer() -> None:
-    """Consume cowrie:events from Redis and broadcast normalized alerts to WebSocket clients."""
+    """Background task: read from Redis stream and broadcast via WebSocket clients."""
     if not HAS_REDIS or redis is None:
+        logger.info("Redis not installed — skipping stream consumer. WebSocket will only get manual broadcasts.")
         return
+
+    logger.info("Redis stream listener started — connecting to %s, stream=%s", REDIS_URL, STREAM_NAME)
     last_id = "$"
+
     while True:
+        client = None
         try:
             client = redis.from_url(REDIS_URL, decode_responses=True)
+            logger.info("Redis stream listener connected")
             while True:
-                try:
-                    results = await client.xread(
-                        {STREAM_NAME: last_id}, count=10, block=500
-                    )
-                except Exception:
-                    await asyncio.sleep(1)
-                    continue
-
+                results = await client.xread(
+                    {STREAM_NAME: last_id}, count=10, block=5000
+                )
                 if not results:
                     continue
 
@@ -109,10 +119,12 @@ async def _redis_stream_consumer() -> None:
                         continue
                     for entry_id, fields in entries:
                         last_id = entry_id
+                        logger.info("Received event from Redis stream: %s", entry_id)
                         try:
                             raw = fields.get("event", "{}")
                             event = json.loads(raw)
-                        except (json.JSONDecodeError, TypeError):
+                        except (json.JSONDecodeError, TypeError) as exc:
+                            logger.warning("Failed to parse event JSON from Redis: %s", exc)
                             continue
 
                         alert = {
@@ -131,7 +143,9 @@ async def _redis_stream_consumer() -> None:
                             }
                         }
                         await manager.broadcast(alert)
+                        logger.info("Broadcasted event to %d websocket clients", len(manager.active_connections))
 
+                        # Handle session.closed event
                         if event.get("event_type") in {"cowrie.session.closed", "session.closed"}:
                             await manager.broadcast({
                                 "type": "session.closed",
@@ -145,16 +159,24 @@ async def _redis_stream_consumer() -> None:
                             })
                             continue
 
-                        # Check for session.new — comes as a JSON-encoded payload from collector
+                        # Handle session.new — comes as a JSON-encoded payload from collector
                         if event.get("type") == "session.new":
                             await manager.broadcast(event)
                             continue
 
         except asyncio.CancelledError:
+            logger.info("Redis stream listener cancelled")
+            if client:
+                await client.close()
             break
         except Exception as exc:
-            logger.error("Redis consumer error: %s", exc, exc_info=True)
-            await asyncio.sleep(3)
+            logger.error("Redis listener error: %s", exc, exc_info=True)
+            if client:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+            await asyncio.sleep(5)
 
 
 # ─── Health ───
