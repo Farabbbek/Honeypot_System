@@ -70,9 +70,10 @@ function KpiCardWithFlash({ title, value, subtitle, color, icon, children }) {
 }
 
 export default function Overview() {
-  const { sessions, events, connected } = useRealtimeData();
+  const { sessions: wsSessions, events, connected } = useRealtimeData();
   const [uptime, setUptime] = useState(0);
   const [stats, setStats] = useState(null);
+  const [restSessions, setRestSessions] = useState([]);
 
   // Uptime counter
   useEffect(() => {
@@ -80,55 +81,85 @@ export default function Overview() {
     return () => clearInterval(t);
   }, []);
 
-  // Fetch /api/stats on mount
+  // Fetch /api/stats and /api/sessions on mount
   const fetchStats = useCallback(() => {
     fetch(`${API}/api/stats`)
       .then(r => r.json())
-      .then(data => setStats(data))
+      .then(data => {
+        console.log("stats payload", data);
+        setStats(data);
+      })
+      .catch(() => {});
+  }, []);
+
+  const fetchSessions = useCallback(() => {
+    fetch(`${API}/api/sessions?limit=50`)
+      .then(r => r.json())
+      .then(data => {
+        console.log("sessions payload", data);
+        if (Array.isArray(data)) setRestSessions(data);
+      })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
     fetchStats();
-  }, [fetchStats]);
+    fetchSessions();
+  }, [fetchStats, fetchSessions]);
 
   // Debounced re-fetch /api/stats on any WebSocket event (1s debounce)
   const debounceRef = useRef(null);
   useEffect(() => {
     if (events.length > 0) {
       clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(fetchStats, 1000);
+      debounceRef.current = setTimeout(() => {
+        fetchStats();
+        fetchSessions();
+      }, 1000);
       return () => clearTimeout(debounceRef.current);
     }
-  }, [events, fetchStats]);
+  }, [events, fetchStats, fetchSessions]);
+
+  // Merge WS sessions (real-time) with REST sessions (history)
+  const allSessions = useMemo(() => {
+    if (restSessions.length > 0) return restSessions;
+    return wsSessions;
+  }, [restSessions, wsSessions]);
 
   // KPI values: prefer /api/stats, fallback to live sessions
-  const totalAttacks = stats?.total_attacks ?? sessions.length;
+  const totalAttacks = stats?.total_attacks ?? allSessions.length;
   const uniqueIPs = useMemo(() => {
     if (stats?.top_ips) return stats.top_ips.length;
-    return new Set(sessions.map(s => s.attacker_ip)).size;
-  }, [stats, sessions]);
-  const highSeverity = stats?.top_tactics
-    ? sessions.filter(s => s.severity === "CRITICAL" || s.severity === "HIGH").length
-    : sessions.filter(s => s.severity === "CRITICAL" || s.severity === "HIGH").length;
-  const activeAttackers = sessions.filter(s => !s._closing).length;
+    return new Set(allSessions.map(s => s.attacker_ip)).size;
+  }, [stats, allSessions]);
+  const highSeverity = useMemo(
+    () => allSessions.filter(s => s.severity === "CRITICAL" || s.severity === "HIGH").length,
+    [allSessions]
+  );
+  const activeAttackers = allSessions.filter(s => !s._closing).length;
 
-  // Top attackers from live sessions
+  // Top attackers from stats.top_ips, fallback to sessions
   const topAttackers = useMemo(() => {
+    if (stats?.top_ips && stats.top_ips.length > 0) {
+      return stats.top_ips.slice(0, 5);
+    }
     const counts = {};
-    sessions.forEach(s => {
+    allSessions.forEach(s => {
       if (s.attacker_ip) counts[s.attacker_ip] = (counts[s.attacker_ip] || 0) + 1;
     });
     return Object.entries(counts)
       .map(([ip, count]) => ({ ip, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
-  }, [sessions]);
+  }, [stats, allSessions]);
 
-  // Top tactics from live sessions
+  // Top tactics from stats.top_tactics, fallback to sessions
   const topTactics = useMemo(() => {
+    if (stats?.top_tactics && stats.top_tactics.length > 0) {
+      return stats.top_tactics.slice(0, 5);
+    }
     const counts = {};
-    sessions.forEach(s => {
+    allSessions.forEach(s => {
       const t = s.current_tactic || "UNKNOWN";
       counts[t] = (counts[t] || 0) + 1;
     });
@@ -136,12 +167,12 @@ export default function Overview() {
       .map(([tactic, count]) => ({ tactic, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
-  }, [sessions]);
+  }, [stats, allSessions]);
 
   const maxTacticCount = topTactics[0]?.count || 1;
 
   // Keep max 10 rows in the table
-  const tableSessions = useMemo(() => sessions.slice(0, 10), [sessions]);
+  const tableSessions = useMemo(() => allSessions.slice(0, 10), [allSessions]);
 
   return (
     <Layout>
@@ -209,7 +240,7 @@ export default function Overview() {
 
       {/* Timeline Chart */}
       <div className="mb-8">
-        <TimelineChart sessions={sessions} height={280} />
+        <TimelineChart sessions={allSessions} height={280} />
       </div>
 
       {/* Main content grid */}
@@ -233,7 +264,7 @@ export default function Overview() {
                 </tr>
               </thead>
               <tbody>
-                {sessions.length === 0 ? (
+                {allSessions.length === 0 ? (
                   <tr><td colSpan={6} className="text-center py-8 text-muted">No sessions yet</td></tr>
                 ) : (
                   tableSessions.map((s) => (
