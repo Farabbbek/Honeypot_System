@@ -6,7 +6,7 @@ import { Globe } from "lucide-react";
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 // Fallback honeypot location (Astana, Kazakhstan) — used if API returns no honeypot object
-const FALLBACK_HONEYPOT = { lat: 51.17, lon: 71.45, city: "Astana", country: "Kazakhstan" };
+const FALLBACK_HONEYPOT = { lat: 51.17, lng: 71.45, city: "Astana", country: "Kazakhstan" };
 
 /**
  * Normalize a map attack point from the backend API shape to the shape
@@ -14,15 +14,15 @@ const FALLBACK_HONEYPOT = { lat: 51.17, lon: 71.45, city: "Astana", country: "Ka
  *   { latitude, longitude, ip, severity, risk_score, session_id, country, city, asn, org, current_tactic }
  */
 function normalizeMapPoint(raw) {
-  const lat = raw.lat ?? raw.latitude ?? null;
-  const lon = raw.lon ?? raw.longitude ?? null;
+  const lat = Number(raw.lat ?? raw.latitude);
+  const lon = Number(raw.lng ?? raw.lon ?? raw.longitude);
   const ip = raw.source_ip ?? raw.ip ?? "Unknown";
 
   // Skip invalid coordinates
-  if (lat == null || lon == null || typeof lat !== "number" || typeof lon !== "number" || (lat === 0 && lon === 0)) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) {
     return null;
   }
-  if (isNaN(lat) || isNaN(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
 
   return {
     latitude:        lat,
@@ -32,6 +32,7 @@ function normalizeMapPoint(raw) {
     city:            raw.city || "",
     severity:        raw.severity || "LOW",
     risk_score:      raw.risk_score ?? 0,
+    count:           raw.count ?? 1,
     session_id:      raw.session_id || null,
     asn:             raw.asn || "",
     org:             raw.org || "",
@@ -57,6 +58,7 @@ export default function MapPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [unknownLocations, setUnknownLocations] = useState(0);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -125,6 +127,12 @@ export default function MapPage() {
           }
         }
 
+        const normalizedPoints = attackPoints
+          .map(normalizeMapPoint)
+          .filter(Boolean);
+        const rawUnknownCount = Number(data?.unknown_locations ?? 0);
+        const invalidPointCount = Math.max(0, attackPoints.length - normalizedPoints.length);
+
         // Use honeypot from API response, or fallback
         const finalHoneypot = honeypot || FALLBACK_HONEYPOT;
         if (!honeypot) {
@@ -132,7 +140,8 @@ export default function MapPage() {
         }
 
         setHoneypot(finalHoneypot);
-        setPoints(attackPoints);
+        setPoints(normalizedPoints);
+        setUnknownLocations(rawUnknownCount + invalidPointCount);
         setLastUpdated(new Date());
         setLoading(false);
         setError("");  // clear any previous error
@@ -214,7 +223,10 @@ export default function MapPage() {
                   />
                   <div className="min-w-0">
                     <div className="font-mono text-xs text-white truncate">{p.ip}</div>
-                    <div className="text-[10px] text-muted truncate">{p.country || p.city}</div>
+                    <div className="text-[10px] text-muted truncate">
+                      {[p.country, p.city].filter(Boolean).join(" · ")}
+                      {p.count > 1 ? ` · ${p.count} attacks` : ""}
+                    </div>
                   </div>
                   <div className="ml-auto">
                     <SeverityBadge severity={p.severity} />
@@ -224,6 +236,14 @@ export default function MapPage() {
               {points.length === 0 && !loading && (
                 <p className="text-muted text-xs text-center py-4">No attack data</p>
               )}
+            </div>
+          </div>
+
+          <div className="glass rounded-2xl p-4">
+            <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-3">Unknown Location</h2>
+            <div className="flex items-end justify-between">
+              <div className="text-3xl font-bold text-white font-mono">{unknownLocations}</div>
+              <div className="text-xs text-muted text-right">sessions without usable coordinates</div>
             </div>
           </div>
 

@@ -47,8 +47,13 @@ function sevArcColor(sev) {
   return [0, 0.9, 1]
 }
 
+function normalizeCoord(value, fallback) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 // ── component ─────────────────────────────────────────────────────────────────
-export default function Globe3D({ points = [], className = "" }) {
+export default function Globe3D({ points = [], honeypot = HONEYPOT, className = "" }) {
   const canvasRef    = useRef(null)
   const containerRef = useRef(null)
   const globeRef     = useRef(null)
@@ -64,8 +69,17 @@ export default function Globe3D({ points = [], className = "" }) {
   const [clicked, setClicked] = useState(null) // sticky marker
 
   // ── memoised data (stable references → no globe destroy on every render) ──
+  const honeypotLocation = useMemo(() => ({
+    lat: normalizeCoord(honeypot?.lat, HONEYPOT.lat),
+    lng: normalizeCoord(honeypot?.lng ?? honeypot?.lon, HONEYPOT.lng),
+  }), [honeypot?.lat, honeypot?.lng, honeypot?.lon])
+
   const validPoints = useMemo(
-    () => points.filter((p) => p.latitude != null && p.longitude != null),
+    () => points.filter((p) => {
+      const lat = Number(p.latitude)
+      const lng = Number(p.longitude)
+      return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
+    }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [JSON.stringify(points)]
   )
@@ -73,7 +87,7 @@ export default function Globe3D({ points = [], className = "" }) {
   const markers = useMemo(() => [
     ...validPoints.map((p, i) => ({
       id:       p.session_id || `atk-${i}`,
-      location: [p.latitude, p.longitude],
+      location: [Number(p.latitude), Number(p.longitude)],
       size:     p.severity === "CRITICAL" ? 0.048 : p.severity === "HIGH" ? 0.036 : 0.026,
       ip:       p.ip           || "Unknown",
       country:  p.country      || "Unknown",
@@ -87,16 +101,16 @@ export default function Globe3D({ points = [], className = "" }) {
     })),
     {
       id:       "honeypot",
-      location: [HONEYPOT.lat, HONEYPOT.lng],
+      location: [honeypotLocation.lat, honeypotLocation.lng],
       size:     0.06,
       ip:       "Honeypot Node",
-      country:  "Kazakhstan",
-      city:     "Astana",
+      country:  honeypot?.country || "Kazakhstan",
+      city:     honeypot?.city || "Astana",
       severity: "SERVER",
       risk: null, asn: "", org: "", tactic: "", tactics: [],
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [validPoints])
+  ], [validPoints, honeypotLocation, honeypot?.country, honeypot?.city])
 
   const cobeMarkers = useMemo(
     () => markers.map((m) => ({ location: m.location, size: m.size })),
@@ -105,13 +119,13 @@ export default function Globe3D({ points = [], className = "" }) {
 
   const cobeArcs = useMemo(
     () => validPoints.map((p) => ({
-      startLat: p.latitude,
-      startLng: p.longitude,
-      endLat:   HONEYPOT.lat,
-      endLng:   HONEYPOT.lng,
+      startLat: Number(p.latitude),
+      startLng: Number(p.longitude),
+      endLat:   honeypotLocation.lat,
+      endLng:   honeypotLocation.lng,
       color:    sevArcColor(p.severity),
     })),
-    [validPoints]
+    [validPoints, honeypotLocation]
   )
 
   const hasCritical = useMemo(
@@ -453,7 +467,9 @@ export default function Globe3D({ points = [], className = "" }) {
           <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <span className="text-white font-mono">Honeypot Node</span>
         </div>
-        <div className="text-slate-400 mt-0.5">Astana, KZ · 51.17°N 71.45°E</div>
+        <div className="text-slate-400 mt-0.5">
+          {honeypot?.city || "Astana"}, {honeypot?.country || "Kazakhstan"} · {honeypotLocation.lat.toFixed(2)}°N {honeypotLocation.lng.toFixed(2)}°E
+        </div>
       </div>
 
       {/* ── Top-right counter ─────────────────────────────────────────────── */}

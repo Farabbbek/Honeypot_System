@@ -14,9 +14,9 @@ import inspect
 import logging
 from typing import Any
 
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session as DBSession
 
+from geo_utils import normalize_enrichment_payload, upsert_ip_intel
 from ip_enrichment import IPEnrichmentService
 from llm_agent import LLMAgent
 from models import IPIntel, Session, ThreatReport
@@ -290,12 +290,8 @@ class AnalysisService:
         return report
 
     def _upsert_ip_intel(self, db: DBSession, data: dict[str, Any]) -> IPIntel:
-        stmt = insert(IPIntel).values(**data)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[IPIntel.ip],
-            set_={key: value for key, value in data.items() if key != "ip"},
-        ).returning(IPIntel)
-        return db.execute(stmt).scalar_one()
+        payload = normalize_enrichment_payload(data["ip"], data)
+        return upsert_ip_intel(db, payload)
 
     def _merge_ioc(self, report_payload: dict[str, Any], session: Session, intel: IPIntel | None) -> dict[str, Any]:
         ioc = dict(report_payload.get("ioc") or {})

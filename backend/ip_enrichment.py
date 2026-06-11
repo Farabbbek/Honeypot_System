@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 import os
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,8 @@ try:
     import geoip2.database
 except ImportError:  # pragma: no cover
     geoip2 = None
+
+logger = logging.getLogger(__name__)
 
 
 class IPEnrichmentService:
@@ -57,22 +60,28 @@ class IPEnrichmentService:
             return result
 
         if os.path.exists(self.geoip_city_db):
-            with geoip2.database.Reader(self.geoip_city_db) as reader:
-                response = reader.city(ip)
-                result.update(
-                    {
-                        "country_code": response.country.iso_code,
-                        "country_name": response.country.name,
-                        "city": response.city.name,
-                        "latitude": response.location.latitude,
-                        "longitude": response.location.longitude,
-                    }
-                )
+            try:
+                with geoip2.database.Reader(self.geoip_city_db) as reader:
+                    response = reader.city(ip)
+                    result.update(
+                        {
+                            "country_code": response.country.iso_code,
+                            "country_name": response.country.name,
+                            "city": response.city.name,
+                            "latitude": response.location.latitude,
+                            "longitude": response.location.longitude,
+                        }
+                    )
+            except Exception as exc:
+                logger.info("GeoIP city lookup did not return data for %s: %s", ip, exc)
 
         if os.path.exists(self.geoip_asn_db):
-            with geoip2.database.Reader(self.geoip_asn_db) as reader:
-                response = reader.asn(ip)
-                result.update({"asn": str(response.autonomous_system_number), "org_name": response.autonomous_system_organization})
+            try:
+                with geoip2.database.Reader(self.geoip_asn_db) as reader:
+                    response = reader.asn(ip)
+                    result.update({"asn": str(response.autonomous_system_number), "org_name": response.autonomous_system_organization})
+            except Exception as exc:
+                logger.info("GeoIP ASN lookup did not return data for %s: %s", ip, exc)
 
         return result
 

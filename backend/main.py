@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -15,13 +17,21 @@ except ImportError:
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, func
+from sqlalchemy import case, desc, func
 from sqlalchemy.orm import Session as DBSession
 
 from analysis_service import AnalysisService
 from database import Base, engine, get_db
+from geo_utils import (
+    clean_country,
+    enrich_ips,
+    geo_session_counts,
+    has_valid_lat_lng,
+    recent_ips_needing_geo,
+    to_float,
+)
 from models import Event, IPIntel, PasswordStat, Session, ThreatReport
-from schemas import EventOut, SessionOut, StatsOut, ThreatReportOut
+from schemas import EventOut, MapAttackPoint, MapHoneypotNode, MapResponse, SessionOut, StatsOut, ThreatReportOut
 
 from ip_enrichment import IPEnrichmentService
 
@@ -68,6 +78,8 @@ analysis_service = AnalysisService(
     output_dir=os.getenv("REPORT_OUTPUT_DIR", "/app/reports"),
 )
 ip_enrichment_service = IPEnrichmentService()
+GEO_API_ENRICH_LIMIT = int(os.getenv("GEO_API_ENRICH_LIMIT", "50"))
+GEO_REFRESH_HOURS = int(os.getenv("GEO_REFRESH_HOURS", "24"))
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 STREAM_NAME = os.getenv("REDIS_STREAM", "cowrie:events")
@@ -289,14 +301,26 @@ def get_session(session_id: str, db: DBSession = Depends(get_db)) -> dict[str, A
 
 # ─── Stats ───
 @app.get("/api/stats", response_model=StatsOut)
-def get_stats(db: DBSession = Depends(get_db)) -> StatsOut:
+async def get_stats(db: DBSession = Depends(get_db)) -> StatsOut:
+    await _enrich_missing_recent_geo(db, reason="/api/stats")
+
     top_ips = [
         {"ip": ip, "count": count}
         for ip, count in db.query(Session.attacker_ip, func.count(Session.id)).group_by(Session.attacker_ip).order_by(desc(func.count(Session.id))).limit(10)
     ]
+    country_counts: Counter[str] = Counter()
+    country_rows = (
+        db.query(Session.attacker_ip, IPIntel.country_name)
+        .outerjoin(IPIntel, IPIntel.ip == Session.attacker_ip)
+        .all()
+    )
+    for _, country in country_rows:
+        known_country = clean_country(country)
+        if known_country:
+            country_counts[known_country] += 1
     top_countries = [
         {"country": country, "count": count}
-        for country, count in db.query(IPIntel.country_name, func.count(IPIntel.id)).group_by(IPIntel.country_name).order_by(desc(func.count(IPIntel.id))).limit(10)
+        for country, count in country_counts.most_common(10)
     ]
     top_tactics = [
         {"tactic": tactic, "count": count}
@@ -306,6 +330,14 @@ def get_stats(db: DBSession = Depends(get_db)) -> StatsOut:
         {"password": password, "count": count}
         for password, count in db.query(PasswordStat.password, PasswordStat.attempt_count).order_by(desc(PasswordStat.attempt_count)).limit(20)
     ]
+    debug_counts = geo_session_counts(db)
+    logger.info(
+        "/api/stats geo debug: total_sessions=%d sessions_with_country=%d sessions_with_valid_lat_lng=%d",
+        debug_counts["total_sessions"],
+        debug_counts["sessions_with_country"],
+        debug_counts["sessions_with_valid_lat_lng"],
+    )
+
     return StatsOut(
         total_attacks=db.query(Session).count(),
         top_ips=top_ips,
@@ -314,53 +346,132 @@ def get_stats(db: DBSession = Depends(get_db)) -> StatsOut:
         top_passwords=top_passwords,
     )
 
-
-from schemas import MapResponse, MapAttackPoint, MapHoneypotNode
-
 # ─── Map ───
 @app.get("/api/map", response_model=MapResponse)
-def map_data(db: DBSession = Depends(get_db)) -> MapResponse:
+async def map_data(db: DBSession = Depends(get_db)) -> MapResponse:
+    await _enrich_missing_recent_geo(db, reason="/api/map")
+
     honeypot = MapHoneypotNode(
         lat=51.17,
-        lon=71.45,
+        lng=71.45,
         city="Astana",
         country="Kazakhstan",
     )
 
     attacks: list[MapAttackPoint] = []
+    unknown_locations = 0
     try:
+        severity_rank = case(
+            (Session.severity == "CRITICAL", 4),
+            (Session.severity == "HIGH", 3),
+            (Session.severity == "MEDIUM", 2),
+            (Session.severity == "LOW", 1),
+            else_=1,
+        )
         rows = (
-            db.query(Session, IPIntel)
-            .join(IPIntel, IPIntel.ip == Session.attacker_ip)
-            .filter(IPIntel.latitude.isnot(None), IPIntel.longitude.isnot(None))
-            .order_by(desc(Session.start_time))
+            db.query(
+                Session.attacker_ip,
+                IPIntel.country_name,
+                IPIntel.city,
+                IPIntel.latitude,
+                IPIntel.longitude,
+                IPIntel.asn,
+                IPIntel.org_name,
+                func.count(Session.id).label("attack_count"),
+                func.max(Session.risk_score).label("risk_score"),
+                func.max(severity_rank).label("severity_rank"),
+                func.max(Session.start_time).label("last_seen"),
+                func.max(Session.session_id).label("session_id"),
+                func.max(Session.current_tactic).label("current_tactic"),
+            )
+            .outerjoin(IPIntel, IPIntel.ip == Session.attacker_ip)
+            .group_by(
+                Session.attacker_ip,
+                IPIntel.country_name,
+                IPIntel.city,
+                IPIntel.latitude,
+                IPIntel.longitude,
+                IPIntel.asn,
+                IPIntel.org_name,
+            )
+            .order_by(desc(func.max(Session.start_time)))
             .limit(1000)
             .all()
         )
 
-        for session, intel in rows:
+        for row in rows:
             try:
-                if intel.latitude is None or intel.longitude is None:
+                lat = to_float(row.latitude)
+                lng = to_float(row.longitude)
+                if not has_valid_lat_lng(lat, lng):
+                    unknown_locations += int(row.attack_count or 0)
                     continue
                 attacks.append(MapAttackPoint(
-                    source_ip=session.attacker_ip,
-                    country=intel.country_name or "",
-                    city=intel.city or "",
-                    lat=intel.latitude,
-                    lon=intel.longitude,
-                    severity=session.severity or "LOW",
-                    risk_score=session.risk_score or 0,
-                    timestamp=session.start_time,
+                    ip=row.attacker_ip,
+                    country=clean_country(row.country_name) or "unknown",
+                    lat=lat,
+                    lng=lng,
+                    severity=_severity_from_rank(row.severity_rank),
+                    count=int(row.attack_count or 0),
+                    city=row.city or "",
+                    risk_score=int(row.risk_score or 0),
+                    session_id=row.session_id,
+                    asn=row.asn or "",
+                    org=row.org_name or "",
+                    current_tactic=row.current_tactic or "",
+                    timestamp=row.last_seen,
                 ))
             except Exception as exc:
-                logger.warning("Skipping map attack point for session %s: %s", session.session_id, exc)
+                logger.warning("Skipping map attack point for IP %s: %s", row.attacker_ip, exc)
                 continue
     except Exception as exc:
         logger.error("Failed to build map attack list: %s", exc, exc_info=True)
         # Return empty attacks — map will show "no data" instead of crashing
 
-    logger.info("/api/map returning %d attacks", len(attacks))
-    return MapResponse(attacks=attacks, honeypot=honeypot)
+    debug_counts = geo_session_counts(db)
+    logger.info(
+        "/api/map geo debug: total_sessions=%d sessions_with_country=%d sessions_with_valid_lat_lng=%d points_sent=%d unknown_locations=%d",
+        debug_counts["total_sessions"],
+        debug_counts["sessions_with_country"],
+        debug_counts["sessions_with_valid_lat_lng"],
+        len(attacks),
+        unknown_locations,
+    )
+    return MapResponse(
+        attacks=attacks,
+        honeypot=honeypot,
+        unknown_locations=unknown_locations,
+        debug={**debug_counts, "points_sent": len(attacks), "unknown_locations": unknown_locations},
+    )
+
+
+async def _enrich_missing_recent_geo(db: DBSession, *, reason: str) -> None:
+    ips = recent_ips_needing_geo(
+        db,
+        limit=GEO_API_ENRICH_LIMIT,
+        refresh_after=timedelta(hours=GEO_REFRESH_HOURS),
+    )
+    if not ips:
+        return
+    result = await enrich_ips(db, ips, service=ip_enrichment_service)
+    logger.info(
+        "%s geo enrichment: candidate_ips=%d attempted=%d stored=%d failed=%d",
+        reason,
+        len(ips),
+        result["attempted"],
+        result["stored"],
+        result["failed"],
+    )
+
+
+def _severity_from_rank(rank: int | None) -> str:
+    if rank == 4:
+        return "CRITICAL"
+    if rank == 3:
+        return "HIGH"
+    if rank == 2:
+        return "MEDIUM"
+    return "LOW"
 
 
 # ─── GeoIP Enrichment ───

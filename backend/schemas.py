@@ -67,19 +67,25 @@ class StatsOut(BaseModel):
 
 
 class MapAttackPoint(BaseModel):
-    source_ip: str
+    ip: str
     country: str
-    city: str
-    lat: float | None = None
-    lon: float | None = None
+    lat: float
+    lng: float
     severity: str | None = "LOW"
+    count: int = 1
+    city: str | None = None
     risk_score: int = 0
+    session_id: str | None = None
+    asn: str | None = None
+    org: str | None = None
+    current_tactic: str | None = None
+    tactics: list[Any] | None = None
     timestamp: datetime | None = None
 
 
 class MapHoneypotNode(BaseModel):
     lat: float
-    lon: float
+    lng: float
     city: str
     country: str
 
@@ -87,3 +93,5 @@ class MapHoneypotNode(BaseModel):
 class MapResponse(BaseModel):
     attacks: list[MapAttackPoint]
     honeypot: MapHoneypotNode
+    unknown_locations: int = 0
+    debug: dict[str, Any] | None = None
