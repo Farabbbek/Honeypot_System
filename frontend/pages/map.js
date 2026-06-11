@@ -25,12 +25,19 @@ export default function MapPage() {
   const [lastUpdated, setLastUpdated] = useState(null);
 
   const load = useCallback(() => {
+    setLoading(true);
+    setError("");
+
     fetch(`${API}/api/map`)
       .then((res) => {
-        if (!res.ok) throw new Error(`API returned ${res.status}`);
+        if (!res.ok) {
+          console.error("map api error", res.status, res.statusText);
+          throw new Error("Failed to load map data");
+        }
         return res.json();
       })
       .then(async (data) => {
+        console.log("map payload", data);
         let attackPoints = Array.isArray(data) ? data : (data.attacks || []);
 
         // Fallback: if map is empty but sessions exist, use sessions + geoip
@@ -66,17 +73,18 @@ export default function MapPage() {
               attackPoints = geoPoints.filter(Boolean);
             }
           } catch {
-            // Keep empty
+            // Keep empty — friendly empty state, not an error
           }
         }
 
         setPoints(attackPoints);
         setLastUpdated(new Date());
         setLoading(false);
-        setError("");
+        setError("");  // clear any previous error
       })
       .catch((err) => {
-        setError(err.message || "Could not load map data");
+        console.error("map api error", err);
+        setError("Failed to load map data");
         setLoading(false);
       });
   }, []);
