@@ -192,6 +192,8 @@ class CowrieCollector:
             failed_logins,
         )
 
+        is_session_close = event["event_type"] in {"cowrie.session.closed", "session.closed"}
+
         db.add(
             Event(
                 session_id=event["session_id"],
@@ -209,14 +211,17 @@ class CowrieCollector:
             self.update_password_stat(db, event.get("password"))
         if event["event_type"] in {"cowrie.login.success", "login.success"}:
             session.successful_login = True
-        if event["event_type"] in {"cowrie.session.closed", "session.closed"}:
+        if is_session_close:
             session.end_time = event["timestamp"]
             if session.start_time:
                 session.duration_seconds = int((session.end_time - session.start_time).total_seconds())
+            # On session close, reclassify based on overall session stats
+            self._finalize_session_classification(db, session)
 
+        # Append per-event tactic to history for detail tracking (not used for final tactic)
         tactic = classified.get("tactic")
-        if tactic and tactic not in {"UNKNOWN", "LOGIN_FAILED"}:
-            self.update_session_profile(session, tactic, classified, event["timestamp"])
+        if tactic and tactic not in {"UNKNOWN", "LOGIN_FAILED"} and not is_session_close:
+            self._append_event_to_history(session, tactic, classified, event["timestamp"])
 
         event["mitre_technique_id"] = classified.get("mitre_technique_id")
         event["mitre_tactic"] = classified.get("mitre_tactic")
@@ -286,42 +291,80 @@ class CowrieCollector:
         )
         return [row[0] for row in rows if row[0]]
 
-    def update_session_profile(self, session: Session, tactic: str, classified: dict[str, Any], timestamp: datetime) -> None:
+    def _append_event_to_history(self, session: Session, tactic: str, classified: dict[str, Any], timestamp: datetime) -> None:
+        """Append a per-event tactic entry to the session's tactic_history.
+        This is used for detail/audit only — the final session tactic
+        is determined by _finalize_session_classification().
+        """
         history = list(session.tactic_history or [])
-        entry_risk = classified.get("risk_score", 0)
         history.append(
             {
                 "tactic": tactic,
                 "timestamp": timestamp.isoformat(),
                 "mitre_technique_id": classified.get("mitre_technique_id"),
-                "risk_score": entry_risk,
+                "risk_score": classified.get("risk_score", 0),
             }
         )
         session.tactic_history = history
 
-        # Recompute risk_score from the full tactic history (accumulative)
-        session.risk_score = min(100, session.risk_score + entry_risk)
+        # Maintain accumulative risk_score for display during live session
+        entry_risk = classified.get("risk_score", 0)
+        if not session.risk_score:
+            session.risk_score = 0
+        session.risk_score = min(100, (session.risk_score or 0) + entry_risk)
         session.severity = self.behavior.severity_from_score(session.risk_score)
 
-        # Pick the dominant tactic (highest risk) instead of blindly overwriting
-        # with the latest event's tactic.
-        risk_by_tactic: dict[str, int] = {}
-        for entry in history:
-            t = entry.get("tactic")
-            if t and t != "UNKNOWN":
-                risk_by_tactic[t] = max(risk_by_tactic.get(t, 0), entry.get("risk_score", 0))
-        dominant = self.behavior._dominant_tactic(history, risk_by_tactic)
+    def _finalize_session_classification(self, db: DBSession, session: Session) -> None:
+        """When a session closes, reclassify it based on overall session stats.
+
+        Uses BehaviorEngine.classify_session() which looks at login count,
+        command count, duration, and connection frequency to produce a
+        more accurate MITRE tactic than per-event classification.
+        """
+        # Count how many sessions this IP has (for PERSISTENCE detection)
+        ip_session_count = (
+            db.query(func.count(Session.id))
+            .filter(Session.attacker_ip == session.attacker_ip)
+            .scalar()
+        ) or 1
+
+        # Extract command tactics from the events
+        events = (
+            db.query(Event)
+            .filter(Event.session_id == session.session_id)
+            .filter(Event.event_type.in_(["cowrie.command.input", "command.input"]))
+            .filter(Event.raw_command.isnot(None))
+            .all()
+        )
+        command_tactics = []
+        for ev in events:
+            ct = self.behavior.command_to_tactic(ev.raw_command)
+            if ct and ct != "UNKNOWN":
+                command_tactics.append(ct)
+
+        result = self.behavior.classify_session(
+            login_attempts=session.login_attempts or 0,
+            successful_login=bool(session.successful_login),
+            command_count=len(events),
+            duration_seconds=session.duration_seconds or 0,
+            session_count_from_ip=ip_session_count,
+            command_tactics=command_tactics,
+        )
+
+        new_tactic = result.get("tactic")
+        new_risk = result.get("risk_score", 0)
+        new_severity = result.get("severity", "LOW")
 
         previous = session.current_tactic
-        session.current_tactic = dominant
+        session.current_tactic = new_tactic
+        session.risk_score = new_risk
+        session.severity = new_severity
 
-        # Re-apply adaptation when the dominant tactic changes or severity escalated
-        if previous != dominant:
-            if session.adaptation_applied in (None, PENDING_ANALYSIS_MARKER):
-                session.adaptation_applied = self.adaptive.apply(dominant, session.severity)
-            elif dominant:
-                # Upgrade adaptation if severity escalated to HIGH/CRITICAL
-                session.adaptation_applied = self.adaptive.apply(dominant, session.severity)
+        # Apply adaptation when tactic is known
+        if new_tactic and new_tactic != "UNKNOWN":
+            session.adaptation_applied = self.adaptive.apply(new_tactic, new_severity)
+        elif session.adaptation_applied in (None, PENDING_ANALYSIS_MARKER):
+            session.adaptation_applied = self.adaptive.apply("RECONNAISSANCE", new_severity)
 
     def update_password_stat(self, db: DBSession, password: str | None) -> None:
         if not password:

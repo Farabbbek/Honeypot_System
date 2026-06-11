@@ -590,10 +590,10 @@ def reclassify_sessions(
 ) -> dict[str, Any]:
     """Re-run tactic classification for existing sessions based on their event logs.
 
+    Uses build_session_profile() which internally calls classify_session() —
+    the same session-level logic now used by the collector on session close.
     This fixes the legacy data issue where all sessions showed
     TACTIC=DEFENSE_EVASION and ADAPTATION=RICH_FAKE_FILESYSTEM.
-    New sessions are not affected — they use the corrected logic
-    in collector.py.
     """
     behavior = BehaviorEngine()
     adaptive = AdaptiveResponseLayer(os.getenv("COWRIE_HONEYFS_ROOT", "/opt/cowrie/honeyfs"))
@@ -629,17 +629,21 @@ def reclassify_sessions(
         new_severity = profile.get("severity", "LOW")
         new_history = profile.get("tactic_history", [])
 
+        changed = False
+
         if new_tactic and new_tactic != session.current_tactic:
             session.current_tactic = new_tactic
+            changed = True
+
+        if new_risk != (session.risk_score or 0) or new_severity != (session.severity or "LOW"):
             session.risk_score = new_risk
             session.severity = new_severity
+            changed = True
+
+        if changed:
             session.tactic_history = new_history
-            session.adaptation_applied = adaptive.apply(new_tactic, new_severity)
-            updated += 1
-        elif new_risk != session.risk_score or new_severity != session.severity:
-            session.risk_score = new_risk
-            session.severity = new_severity
-            session.tactic_history = new_history
+            if new_tactic and new_tactic != "UNKNOWN":
+                session.adaptation_applied = adaptive.apply(new_tactic, new_severity)
             updated += 1
         else:
             skipped += 1

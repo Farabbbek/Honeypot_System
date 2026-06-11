@@ -7,13 +7,12 @@ class BehaviorEngine:
     TACTIC_WEIGHTS = {
         "UNKNOWN": 0,
         "LOGIN_FAILED": 0,
-        "BRUTE_FORCE": 25,
         "RECONNAISSANCE": 15,
         "DISCOVERY": 10,
         "INITIAL_ACCESS": 20,
         "CREDENTIAL_ACCESS": 30,
         "EXECUTION": 30,
-        "PERSISTENCE": 30,
+        "PERSISTENCE": 25,
         "DEFENSE_EVASION": 25,
         "LATERAL_MOVEMENT": 30,
         "COMMAND_AND_CONTROL": 25,
@@ -165,6 +164,96 @@ class BehaviorEngine:
 
         return self._unknown()
 
+    def classify_session(
+        self,
+        login_attempts: int = 0,
+        successful_login: bool = False,
+        command_count: int = 0,
+        duration_seconds: int = 0,
+        session_count_from_ip: int = 1,
+        command_tactics: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Classify a completed session based on its overall characteristics.
+
+        Rules:
+        - 0 logins, 0 commands, duration < 5s  → RECONNAISSANCE (probing/scanning)
+        - Multiple failed logins (attempts > 0), no success → CREDENTIAL_ACCESS (brute force)
+        - Logged in successfully, ran no commands → INITIAL_ACCESS
+        - Logged in and ran commands → EXECUTION (unless a higher-risk command tactic dominates)
+        - Same IP with >= 3 sessions → PERSISTENCE (repeated connections)
+        - Explicit evasion commands (obfuscation, log clearing) → DEFENSE_EVASION
+        """
+        risk_score = 0
+        tactic = "RECONNAISSANCE"
+        technique_id = "T1046"
+        description = "Network Service Discovery"
+
+        # 1) If the attacker ran explicit evasion commands, mark DEFENSE_EVASION
+        if command_tactics and "DEFENSE_EVASION" in command_tactics:
+            tactic = "DEFENSE_EVASION"
+            technique_id = "T1562"
+            description = "Defense Evasion - Impair Defenses"
+            risk_score = self.TACTIC_WEIGHTS["DEFENSE_EVASION"]
+
+        # 2) If logged in AND ran commands → EXECUTION (strongest signal)
+        elif successful_login and command_count > 0:
+            # Check if any command tactic is higher-risk than EXECUTION
+            if command_tactics:
+                highest = max(command_tactics, key=lambda t: self.TACTIC_WEIGHTS.get(t, 0))
+                if self.TACTIC_WEIGHTS.get(highest, 0) > self.TACTIC_WEIGHTS["EXECUTION"]:
+                    tactic = highest
+                else:
+                    tactic = "EXECUTION"
+            else:
+                tactic = "EXECUTION"
+            technique_id = "T1059"
+            description = "Command and Scripting Interpreter"
+            risk_score = self.TACTIC_WEIGHTS[tactic]
+
+        # 3) Logged in successfully, no commands → INITIAL_ACCESS
+        elif successful_login:
+            tactic = "INITIAL_ACCESS"
+            technique_id = "T1078"
+            description = "Valid Accounts - Initial Access"
+            risk_score = self.TACTIC_WEIGHTS["INITIAL_ACCESS"]
+
+        # 4) Multiple failed login attempts → CREDENTIAL_ACCESS
+        elif login_attempts > 0:
+            tactic = "CREDENTIAL_ACCESS"
+            technique_id = "T1110.001"
+            description = "Brute Force: Password Guessing"
+            risk_score = min(40, login_attempts * 2 + 10)
+
+        # 5) Repeated connections from same IP (>= 3 sessions) → PERSISTENCE
+        elif session_count_from_ip >= 3:
+            tactic = "PERSISTENCE"
+            technique_id = "T1078.003"
+            description = "Repeated Connection Attempts"
+            risk_score = self.TACTIC_WEIGHTS["PERSISTENCE"]
+
+        # 6) Short probe sessions (duration < 5s, no logins, no commands) → RECONNAISSANCE
+        elif duration_seconds < 5:
+            tactic = "RECONNAISSANCE"
+            technique_id = "T1046"
+            description = "Network Service Discovery"
+            risk_score = self.TACTIC_WEIGHTS["RECONNAISSANCE"]
+
+        # 7) Longer idle session >5s → still RECONNAISSANCE but slightly higher weight
+        else:
+            tactic = "RECONNAISSANCE"
+            technique_id = "T1046"
+            description = "Extended Reconnaissance / Probing"
+            risk_score = self.TACTIC_WEIGHTS["RECONNAISSANCE"] + 5
+
+        return {
+            "tactic": tactic,
+            "mitre_technique_id": technique_id,
+            "mitre_tactic": self._mitre_tactic_from_tactic(tactic),
+            "description": description,
+            "risk_score": min(100, risk_score),
+            "severity": self.severity_from_score(risk_score),
+        }
+
     def command_to_tactic(self, command: str) -> str:
         tokens = self._tokenize(command.strip())
         if not tokens:
@@ -202,32 +291,79 @@ class BehaviorEngine:
         failed_logins = []
         risk_by_tactic: dict[str, int] = {}
 
+        # Compute session-level metrics
+        login_attempts = 0
+        successful_login = False
+        command_count = 0
+        command_tactics = []
+        start_time = None
+        end_time = None
+
         for event in events:
             timestamp = event.get("timestamp") or datetime.now(UTC)
             event_type = event.get("event_type") or event.get("eventid") or ""
+            command = event.get("raw_command") or event.get("command") or ""
+
             if event_type in {"cowrie.login.failed", "login.failed"}:
                 failed_logins.append(timestamp)
+                login_attempts += 1
 
-            classified = self.classify_event(event, failed_logins)
-            tactic = classified.get("tactic")
-            if tactic and tactic != "UNKNOWN":
-                risk_by_tactic[tactic] = max(risk_by_tactic.get(tactic, 0), classified.get("risk_score", 0))
-                history.append(
-                    {
-                        "tactic": tactic,
-                        "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
-                        "mitre_technique_id": classified.get("mitre_technique_id"),
-                    }
-                )
+            if event_type in {"cowrie.login.success", "login.success"}:
+                successful_login = True
 
-        risk_score = min(100, sum(risk_by_tactic.values()))
-        # Pick the dominant tactic: highest risk_score, ties broken by most recent
-        current_tactic = self._dominant_tactic(history, risk_by_tactic)
+            if event_type in {"cowrie.command.input", "command.input"} and command.strip():
+                command_count += 1
+                ct = self.command_to_tactic(command)
+                if ct and ct != "UNKNOWN":
+                    command_tactics.append(ct)
+
+            if event_type in {"cowrie.session.connect", "session.connect"}:
+                if start_time is None:
+                    start_time = timestamp
+
+            if event_type in {"cowrie.session.closed", "session.closed"}:
+                end_time = timestamp
+
+            # Also build event-level history for per-event details
+            if event_type not in {"cowrie.session.closed", "session.closed",
+                                   "cowrie.log.closed", "log.closed"}:
+                classified = self.classify_event(event, failed_logins)
+                tactic = classified.get("tactic")
+                if tactic and tactic not in {"UNKNOWN", "LOGIN_FAILED"}:
+                    risk_by_tactic[tactic] = max(risk_by_tactic.get(tactic, 0), classified.get("risk_score", 0))
+                    history.append(
+                        {
+                            "tactic": tactic,
+                            "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+                            "mitre_technique_id": classified.get("mitre_technique_id"),
+                        }
+                    )
+
+        duration = 0
+        if start_time and end_time:
+            duration = int((end_time - start_time).total_seconds())
+        elif start_time:
+            duration = 0
+
+        # Use session-level classification for the final tactic
+        session_class = self.classify_session(
+            login_attempts=login_attempts,
+            successful_login=successful_login,
+            command_count=command_count,
+            duration_seconds=duration,
+            command_tactics=command_tactics,
+        )
+
+        # Compute overall risk from event history + session-level risk
+        risk_score = min(100, sum(risk_by_tactic.values()) + session_class.get("risk_score", 0))
+        current_tactic = session_class.get("tactic")
+        severity = session_class.get("severity")
+
         return {
             "current_tactic": current_tactic,
             "tactic_history": history,
             "risk_score": risk_score,
-            "severity": self.severity_from_score(risk_score),
+            "severity": severity,
         }
 
     @staticmethod
@@ -239,13 +375,11 @@ class BehaviorEngine:
         """
         if not history:
             return None
-        # Build recency map: tactic → last timestamp index
         recency: dict[str, int] = {}
         for idx, entry in enumerate(history):
             t = entry.get("tactic")
             if t:
                 recency[t] = idx
-        # Sort: highest risk first, then most recent for ties
         ranked = sorted(
             risk_by_tactic.keys(),
             key=lambda t: (risk_by_tactic.get(t, 0), recency.get(t, 0)),
@@ -318,6 +452,24 @@ class BehaviorEngine:
 
     def _internal_tactic(self, mitre_tactic: str) -> str:
         return mitre_tactic.upper().replace(" ", "_").replace("-", "_")
+
+    def _mitre_tactic_from_tactic(self, tactic: str) -> str:
+        """Return a human-readable MITRE tactic name from our internal tactic label."""
+        mapping = {
+            "RECONNAISSANCE": "Reconnaissance",
+            "CREDENTIAL_ACCESS": "Credential Access",
+            "INITIAL_ACCESS": "Initial Access",
+            "EXECUTION": "Execution",
+            "PERSISTENCE": "Persistence",
+            "DEFENSE_EVASION": "Defense Evasion",
+            "DISCOVERY": "Discovery",
+            "LATERAL_MOVEMENT": "Lateral Movement",
+            "COMMAND_AND_CONTROL": "Command and Control",
+            "EXFILTRATION": "Exfiltration",
+            "IMPACT": "Impact",
+            "MALWARE_DEPLOYMENT": "Malware Deployment",
+        }
+        return mapping.get(tactic, tactic)
 
     def _unknown(self) -> dict[str, str]:
         return {
