@@ -26,6 +26,171 @@ from pdf_export import PDFExporter
 logger = logging.getLogger(__name__)
 AUTO_NOTIFY_SEVERITIES = {"MEDIUM", "HIGH", "CRITICAL"}
 
+# ── Noise Filter Tuning ──
+MIN_ALERT_RISK_SCORE = 40
+MIN_COMMAND_COUNT = 1
+NOISE_MAX_DURATION_SECONDS = 2
+
+# Events that bots typically produce — not indicative of real attacker activity
+LOW_VALUE_EVENT_TYPES = {
+    "cowrie.session.connect",
+    "cowrie.client.version",
+    "cowrie.client.kex",
+    "cowrie.login.success",
+    "cowrie.login.failed",
+    "cowrie.session.closed",
+    "session.connect",
+    "client.version",
+    "client.kex",
+    "login.success",
+    "login.failed",
+    "session.closed",
+}
+
+# Tactics that indicate real attacker behavior (MITRE ATT&CK)
+ALERT_WORTHY_TACTICS = {
+    "EXECUTION",
+    "PERSISTENCE",
+    "PRIVILEGE_ESCALATION",
+    "DEFENSE_EVASION",
+    "CREDENTIAL_ACCESS",
+    "DISCOVERY",
+    "LATERAL_MOVEMENT",
+    "COLLECTION",
+    "EXFILTRATION",
+}
+
+# Suspicious keywords in commands that indicate real attacker activity
+SUSPICIOUS_KEYWORDS = [
+    "wget",
+    "curl",
+    "chmod",
+    "scp",
+    "tftp",
+    "nc",
+    "bash",
+    "sh",
+    "python",
+    "perl",
+    "/etc/passwd",
+    "/etc/shadow",
+    "crontab",
+    "whoami",
+    "uname",
+    "id",
+    "cat",
+    "tar",
+]
+
+
+def should_send_telegram_alert(session: Session, events: list[Any]) -> bool:
+    """Return True if this session warrants a Telegram notification.
+
+    Filters out bot/noise sessions that only connect, try credentials,
+    and disconnect without executing any commands.
+    """
+    session_id = getattr(session, "session_id", "unknown")
+    risk_score = getattr(session, "risk_score", 0) or 0
+    severity = (getattr(session, "severity", "LOW") or "LOW").upper()
+    tactic = (getattr(session, "current_tactic", "") or "").upper()
+    duration = getattr(session, "duration_seconds", 0) or 0
+
+    # Extract commands and event types
+    commands: list[str] = []
+    event_types: set[str] = set()
+
+    for ev in events:
+        et = (getattr(ev, "event_type", "") or "").lower()
+        event_types.add(et)
+        cmd = getattr(ev, "raw_command", None)
+        if cmd and isinstance(cmd, str) and cmd.strip():
+            commands.append(cmd.strip())
+
+    command_count = len(commands)
+
+    # ── ALERT-WORTHY checks (short-circuit, return True) ──
+
+    # At least one command executed
+    if command_count >= MIN_COMMAND_COUNT:
+        logger.info(
+            "Sending Telegram alert for interactive attacker session %s (%d commands)",
+            session_id,
+            command_count,
+        )
+        return True
+
+    # Risk score threshold
+    if risk_score >= MIN_ALERT_RISK_SCORE:
+        logger.info(
+            "Sending Telegram alert for high-risk session %s (risk_score=%d)",
+            session_id,
+            risk_score,
+        )
+        return True
+
+    # High or Critical severity
+    if severity in {"HIGH", "CRITICAL"}:
+        logger.info(
+            "Sending Telegram alert for %s severity session %s",
+            severity,
+            session_id,
+        )
+        return True
+
+    # Alert-worthy tactic
+    if tactic in ALERT_WORTHY_TACTICS:
+        logger.info(
+            "Sending Telegram alert for tactic %s in session %s",
+            tactic,
+            session_id,
+        )
+        return True
+
+    # Suspicious keywords in any command
+    for cmd in commands:
+        cmd_lower = cmd.lower()
+        for keyword in SUSPICIOUS_KEYWORDS:
+            if keyword.lower() in cmd_lower:
+                logger.info(
+                    "Sending Telegram alert for suspicious keyword '%s' in session %s",
+                    keyword,
+                    session_id,
+                )
+                return True
+
+    # ── NOISE checks: suppress if no commands and duration is short ──
+
+    # Are all events low-value?
+    all_low_value = all(et in LOW_VALUE_EVENT_TYPES for et in event_types) if event_types else True
+
+    if all_low_value and duration < NOISE_MAX_DURATION_SECONDS:
+        logger.info(
+            "Skipping Telegram alert for noise session %s (duration=%ds, no commands)",
+            session_id,
+            duration,
+        )
+        return False
+
+    # If duration is short and no commands, it's likely a bot
+    if command_count == 0 and duration < NOISE_MAX_DURATION_SECONDS:
+        logger.info(
+            "Skipping Telegram alert for noise session %s (duration=%ds, no commands)",
+            session_id,
+            duration,
+        )
+        return False
+
+    # Default: send alert for anything that passes severity/tactic threshold above,
+    # or for sessions that don't fit the noise profile
+    logger.info(
+        "Sending Telegram alert for session %s (risk=%d, severity=%s, tactic=%s)",
+        session_id,
+        risk_score,
+        severity,
+        tactic,
+    )
+    return True
+
 
 class AnalysisService:
     def __init__(
@@ -108,14 +273,19 @@ class AnalysisService:
             logger.warning("PDF export failed for session %s: %s", session_id, exc)
 
         if report.severity in AUTO_NOTIFY_SEVERITIES:
-            payload = {**report_payload, "session_id": session_id, "severity": report.severity}
-            try:
-                sent = await self.notifier.send_attack_alert(payload)
-            except Exception as exc:
-                logger.warning("Telegram notify failed for session %s: %s", session_id, exc)
-                sent = False
-            report.notification_sent = sent
-            db.commit()
+            if should_send_telegram_alert(session, events):
+                payload = {**report_payload, "session_id": session_id, "severity": report.severity}
+                try:
+                    sent = await self.notifier.send_attack_alert(payload)
+                except Exception as exc:
+                    logger.warning("Telegram notify failed for session %s: %s", session_id, exc)
+                    sent = False
+                report.notification_sent = sent
+                db.commit()
+            else:
+                logger.info("Suppressed Telegram alert for noise session %s", session_id)
+                report.notification_sent = False
+                db.commit()
 
         return report
 
