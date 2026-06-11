@@ -8,6 +8,39 @@ const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // Fallback honeypot location (Astana, Kazakhstan) — used if API returns no honeypot object
 const FALLBACK_HONEYPOT = { lat: 51.17, lon: 71.45, city: "Astana", country: "Kazakhstan" };
 
+/**
+ * Normalize a map attack point from the backend API shape to the shape
+ * Globe3D component expects:
+ *   { latitude, longitude, ip, severity, risk_score, session_id, country, city, asn, org, current_tactic }
+ */
+function normalizeMapPoint(raw) {
+  const lat = raw.lat ?? raw.latitude ?? null;
+  const lon = raw.lon ?? raw.longitude ?? null;
+  const ip = raw.source_ip ?? raw.ip ?? "Unknown";
+
+  // Skip invalid coordinates
+  if (lat == null || lon == null || typeof lat !== "number" || typeof lon !== "number" || (lat === 0 && lon === 0)) {
+    return null;
+  }
+  if (isNaN(lat) || isNaN(lon)) return null;
+
+  return {
+    latitude:        lat,
+    longitude:       lon,
+    ip,
+    country:         raw.country || "",
+    city:            raw.city || "",
+    severity:        raw.severity || "LOW",
+    risk_score:      raw.risk_score ?? 0,
+    session_id:      raw.session_id || null,
+    asn:             raw.asn || "",
+    org:             raw.org || "",
+    current_tactic:  raw.current_tactic || "",
+    tactics:         raw.tactics || [],
+    timestamp:       raw.timestamp || null,
+  };
+}
+
 function SeverityBadge({ severity }) {
   const classes = {
     CRITICAL: "severity-critical",
