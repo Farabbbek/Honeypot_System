@@ -22,7 +22,7 @@ server {
 
     # ── API proxy to FastAPI backend ──
     location /api/ {
-        proxy_pass http://server:8000;
+        proxy_pass http://server:8000/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -32,7 +32,7 @@ server {
 
     # ── WebSocket proxy for real-time alerts ──
     location /ws/ {
-        proxy_pass http://server:8000;
+        proxy_pass http://server:8000/ws/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -72,5 +72,6 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Let nginx pass upstream errors directly (no custom error pages)
+    # Let nginx pass upstream error codes directly (no custom error pages)
+    # This allows us to see the real error when debugging
 }
