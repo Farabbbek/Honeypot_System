@@ -51,14 +51,18 @@ class TelegramNotifier:
         if response.status_code >= 400:
             self.last_error = self._extract_telegram_error(response)
             if "parse" in (self.last_error or "").lower():
-                # Fallback: send without parse_mode
+                # Fallback: strip HTML tags and send as plain text with raw URL
+                import re
+                plain = re.sub(r"<[^>]*>", "", text)
+                report_url = f"{self.dashboard_url}/sessions/{report.get('session_id', 'unknown')}"
+                plain += f"\n\n🔗 View Full Report:\n{report_url}"
                 async with httpx.AsyncClient(timeout=5) as client:
                     try:
                         response = await client.post(
                             url,
                             json={
                                 "chat_id": self.chat_id,
-                                "text": text,
+                                "text": plain,
                                 "disable_web_page_preview": True,
                             },
                         )
