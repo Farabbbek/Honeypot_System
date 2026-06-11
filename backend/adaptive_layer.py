@@ -17,6 +17,7 @@ class AdaptiveResponseLayer:
               RECONNAISSANCE).
         """
         handlers = {
+            "INITIAL_ACCESS": self._deceptive_banner,
             "BRUTE_FORCE": self._honey_credentials,
             "RECONNAISSANCE": self._deceptive_banner,
             "DISCOVERY": self._inject_discovery_bait,
