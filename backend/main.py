@@ -315,34 +315,52 @@ def get_stats(db: DBSession = Depends(get_db)) -> StatsOut:
     )
 
 
+from schemas import MapResponse, MapAttackPoint, MapHoneypotNode
+
 # ─── Map ───
-@app.get("/api/map")
-def map_data(db: DBSession = Depends(get_db)) -> list[dict[str, Any]]:
-    rows = (
-        db.query(Session, IPIntel)
-        .join(IPIntel, IPIntel.ip == Session.attacker_ip)
-        .filter(IPIntel.latitude.isnot(None), IPIntel.longitude.isnot(None))
-        .order_by(desc(Session.start_time))
-        .limit(1000)
-        .all()
+@app.get("/api/map", response_model=MapResponse)
+def map_data(db: DBSession = Depends(get_db)) -> MapResponse:
+    honeypot = MapHoneypotNode(
+        lat=51.17,
+        lon=71.45,
+        city="Astana",
+        country="Kazakhstan",
     )
-    return [
-        {
-            "session_id": session.session_id,
-            "ip": session.attacker_ip,
-            "latitude": intel.latitude,
-            "longitude": intel.longitude,
-            "country": intel.country_name,
-            "city": intel.city,
-            "severity": session.severity,
-            "risk_score": session.risk_score,
-            "asn": intel.asn or "",
-            "org": intel.org_name or "",
-            "tactics": session.tactic_history if isinstance(session.tactic_history, list) else [],
-            "current_tactic": session.current_tactic or "",
-        }
-        for session, intel in rows
-    ]
+
+    attacks: list[MapAttackPoint] = []
+    try:
+        rows = (
+            db.query(Session, IPIntel)
+            .join(IPIntel, IPIntel.ip == Session.attacker_ip)
+            .filter(IPIntel.latitude.isnot(None), IPIntel.longitude.isnot(None))
+            .order_by(desc(Session.start_time))
+            .limit(1000)
+            .all()
+        )
+
+        for session, intel in rows:
+            try:
+                if intel.latitude is None or intel.longitude is None:
+                    continue
+                attacks.append(MapAttackPoint(
+                    source_ip=session.attacker_ip,
+                    country=intel.country_name or "",
+                    city=intel.city or "",
+                    lat=intel.latitude,
+                    lon=intel.longitude,
+                    severity=session.severity or "LOW",
+                    risk_score=session.risk_score or 0,
+                    timestamp=session.start_time,
+                ))
+            except Exception as exc:
+                logger.warning("Skipping map attack point for session %s: %s", session.session_id, exc)
+                continue
+    except Exception as exc:
+        logger.error("Failed to build map attack list: %s", exc, exc_info=True)
+        # Return empty attacks — map will show "no data" instead of crashing
+
+    logger.info("/api/map returning %d attacks", len(attacks))
+    return MapResponse(attacks=attacks, honeypot=honeypot)
 
 
 # ─── GeoIP Enrichment ───

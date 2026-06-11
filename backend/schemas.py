@@ -64,3 +64,26 @@ class StatsOut(BaseModel):
     top_countries: list[dict[str, Any]]
     top_tactics: list[dict[str, Any]]
     top_passwords: list[dict[str, Any]]
+
+
+class MapAttackPoint(BaseModel):
+    source_ip: str
+    country: str
+    city: str
+    lat: float | None = None
+    lon: float | None = None
+    severity: str | None = "LOW"
+    risk_score: int = 0
+    timestamp: datetime | None = None
+
+
+class MapHoneypotNode(BaseModel):
+    lat: float
+    lon: float
+    city: str
+    country: str
+
+
+class MapResponse(BaseModel):
+    attacks: list[MapAttackPoint]
+    honeypot: MapHoneypotNode

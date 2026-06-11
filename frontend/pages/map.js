@@ -5,8 +5,8 @@ import { Globe } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// Honeypot node location (Astana, Kazakhstan)
-const HONEYPOT = { lat: 51.17, lon: 71.45, city: "Astana", country: "Kazakhstan" };
+// Fallback honeypot location (Astana, Kazakhstan) — used if API returns no honeypot object
+const FALLBACK_HONEYPOT = { lat: 51.17, lon: 71.45, city: "Astana", country: "Kazakhstan" };
 
 function SeverityBadge({ severity }) {
   const classes = {
@@ -20,6 +20,7 @@ function SeverityBadge({ severity }) {
 
 export default function MapPage() {
   const [points, setPoints] = useState([]);
+  const [honeypot, setHoneypot] = useState(FALLBACK_HONEYPOT);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -38,7 +39,21 @@ export default function MapPage() {
       })
       .then(async (data) => {
         console.log("map payload", data);
-        let attackPoints = Array.isArray(data) ? data : (data.attacks || []);
+        // New API shape: { attacks: [...], honeypot: {...} }
+        // Old API shape (fallback): flat array [...]
+        let attackPoints = [];
+        let honeypot = null;
+
+        if (data && typeof data === "object" && !Array.isArray(data)) {
+          // New shape
+          attackPoints = Array.isArray(data.attacks) ? data.attacks : [];
+          if (data.honeypot && typeof data.honeypot === "object") {
+            honeypot = data.honeypot;
+          }
+        } else if (Array.isArray(data)) {
+          // Old shape fallback: flat array
+          attackPoints = data;
+        }
 
         // Fallback: if map is empty but sessions exist, use sessions + geoip
         if (attackPoints.length === 0) {
@@ -77,6 +92,13 @@ export default function MapPage() {
           }
         }
 
+        // Use honeypot from API response, or fallback
+        const finalHoneypot = honeypot || FALLBACK_HONEYPOT;
+        if (!honeypot) {
+          console.log("map: using fallback honeypot location");
+        }
+
+        setHoneypot(finalHoneypot);
         setPoints(attackPoints);
         setLastUpdated(new Date());
         setLoading(false);
@@ -124,7 +146,7 @@ export default function MapPage() {
                 <p className="text-danger">{error}</p>
               </div>
             ) : (
-              <Globe3D points={points} honeypot={HONEYPOT} className="w-full h-full" />
+              <Globe3D points={points} honeypot={honeypot} className="w-full h-full" />
             )}
           </div>
           <p className="text-xs text-muted mt-2 text-center">
