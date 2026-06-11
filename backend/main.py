@@ -21,6 +21,8 @@ from sqlalchemy import case, desc, func
 from sqlalchemy.orm import Session as DBSession
 
 from analysis_service import AnalysisService
+from behavior_engine import BehaviorEngine
+from adaptive_layer import AdaptiveResponseLayer
 from database import Base, engine, get_db
 from geo_utils import (
     clean_country,
@@ -578,3 +580,80 @@ async def notify_threat(report_id: UUID, db: DBSession = Depends(get_db)) -> dic
 @app.get("/api/telegram/diagnose")
 async def telegram_diagnose() -> dict[str, Any]:
     return await analysis_service.notifier.diagnose()
+
+
+# ─── Session Reclassification (for existing sessions) ───
+@app.post("/api/sessions/reclassify")
+def reclassify_sessions(
+    db: DBSession = Depends(get_db),
+    limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    """Re-run tactic classification for existing sessions based on their event logs.
+
+    This fixes the legacy data issue where all sessions showed
+    TACTIC=DEFENSE_EVASION and ADAPTATION=RICH_FAKE_FILESYSTEM.
+    New sessions are not affected — they use the corrected logic
+    in collector.py.
+    """
+    behavior = BehaviorEngine()
+    adaptive = AdaptiveResponseLayer(os.getenv("COWRIE_HONEYFS_ROOT", "/opt/cowrie/honeyfs"))
+
+    sessions = db.query(Session).order_by(desc(Session.start_time)).limit(limit).all()
+    updated = 0
+    skipped = 0
+
+    for session in sessions:
+        events = (
+            db.query(Event)
+            .filter(Event.session_id == session.session_id)
+            .order_by(Event.timestamp)
+            .all()
+        )
+
+        if not events:
+            skipped += 1
+            continue
+
+        event_dicts = [
+            {
+                "event_type": ev.event_type,
+                "raw_command": ev.raw_command or "",
+                "timestamp": ev.timestamp,
+            }
+            for ev in events
+        ]
+
+        profile = behavior.build_session_profile(event_dicts)
+        new_tactic = profile.get("current_tactic")
+        new_risk = profile.get("risk_score", 0)
+        new_severity = profile.get("severity", "LOW")
+        new_history = profile.get("tactic_history", [])
+
+        if new_tactic and new_tactic != session.current_tactic:
+            session.current_tactic = new_tactic
+            session.risk_score = new_risk
+            session.severity = new_severity
+            session.tactic_history = new_history
+            session.adaptation_applied = adaptive.apply(new_tactic, new_severity)
+            updated += 1
+        elif new_risk != session.risk_score or new_severity != session.severity:
+            session.risk_score = new_risk
+            session.severity = new_severity
+            session.tactic_history = new_history
+            updated += 1
+        else:
+            skipped += 1
+
+    db.commit()
+
+    logger.info(
+        "Reclassification complete: updated=%d skipped=%d total=%d",
+        updated,
+        skipped,
+        len(sessions),
+    )
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "total": len(sessions),
+    }

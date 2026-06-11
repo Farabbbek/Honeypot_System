@@ -139,13 +139,14 @@ class BehaviorEngine:
 
             intensity = self.brute_force_intensity(failed_logins)
             if intensity:
-                result = self._tactic("BRUTE_FORCE", "T1110.001", "Credential Access", "Brute Force: Password Guessing")
-                result["internal_tactic"] = "BRUTE_FORCE"
+                result = self._tactic("CREDENTIAL_ACCESS", "T1110.001", "Credential Access", "Brute Force: Password Guessing")
+                result["internal_tactic"] = "CREDENTIAL_ACCESS"
                 if intensity == "HEAVY":
                     result["risk_score"] = 35
                 result["brute_force_intensity"] = intensity
                 return result
-            return self._tactic("LOGIN_FAILED", "T1110.001", "Credential Access", "Failed Login Attempt")
+            # Even individual failed logins contribute to CREDENTIAL_ACCESS tactic
+            return self._tactic("CREDENTIAL_ACCESS", "T1110.001", "Credential Access", "Failed Login Attempt")
 
         # Check non-command event types after login.failed so brute force can be detected.
         if event_type in self.EVENT_MITRE:
@@ -220,13 +221,37 @@ class BehaviorEngine:
                 )
 
         risk_score = min(100, sum(risk_by_tactic.values()))
-        current_tactic = history[-1]["tactic"] if history else None
+        # Pick the dominant tactic: highest risk_score, ties broken by most recent
+        current_tactic = self._dominant_tactic(history, risk_by_tactic)
         return {
             "current_tactic": current_tactic,
             "tactic_history": history,
             "risk_score": risk_score,
             "severity": self.severity_from_score(risk_score),
         }
+
+    @staticmethod
+    def _dominant_tactic(history: list[dict], risk_by_tactic: dict[str, int]) -> str | None:
+        """Select the dominant tactic from session history.
+
+        Uses highest risk_score; ties broken by most-recent occurrence.
+        Returns None if history is empty.
+        """
+        if not history:
+            return None
+        # Build recency map: tactic → last timestamp index
+        recency: dict[str, int] = {}
+        for idx, entry in enumerate(history):
+            t = entry.get("tactic")
+            if t:
+                recency[t] = idx
+        # Sort: highest risk first, then most recent for ties
+        ranked = sorted(
+            risk_by_tactic.keys(),
+            key=lambda t: (risk_by_tactic.get(t, 0), recency.get(t, 0)),
+            reverse=True,
+        )
+        return ranked[0] if ranked else None
 
     def is_brute_force(self, failed_login_times: list[datetime]) -> bool:
         return self.brute_force_intensity(failed_login_times) is not None

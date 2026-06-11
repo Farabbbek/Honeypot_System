@@ -288,21 +288,40 @@ class CowrieCollector:
 
     def update_session_profile(self, session: Session, tactic: str, classified: dict[str, Any], timestamp: datetime) -> None:
         history = list(session.tactic_history or [])
-        previous = session.current_tactic
+        entry_risk = classified.get("risk_score", 0)
         history.append(
             {
                 "tactic": tactic,
                 "timestamp": timestamp.isoformat(),
                 "mitre_technique_id": classified.get("mitre_technique_id"),
+                "risk_score": entry_risk,
             }
         )
         session.tactic_history = history
-        session.current_tactic = tactic
-        session.risk_score = min(100, session.risk_score + classified.get("risk_score", 0))
+
+        # Recompute risk_score from the full tactic history (accumulative)
+        session.risk_score = min(100, session.risk_score + entry_risk)
         session.severity = self.behavior.severity_from_score(session.risk_score)
-        if previous != tactic:
+
+        # Pick the dominant tactic (highest risk) instead of blindly overwriting
+        # with the latest event's tactic.
+        risk_by_tactic: dict[str, int] = {}
+        for entry in history:
+            t = entry.get("tactic")
+            if t and t != "UNKNOWN":
+                risk_by_tactic[t] = max(risk_by_tactic.get(t, 0), entry.get("risk_score", 0))
+        dominant = self.behavior._dominant_tactic(history, risk_by_tactic)
+
+        previous = session.current_tactic
+        session.current_tactic = dominant
+
+        # Re-apply adaptation when the dominant tactic changes or severity escalated
+        if previous != dominant:
             if session.adaptation_applied in (None, PENDING_ANALYSIS_MARKER):
-                session.adaptation_applied = self.adaptive.apply(tactic)
+                session.adaptation_applied = self.adaptive.apply(dominant, session.severity)
+            elif dominant:
+                # Upgrade adaptation if severity escalated to HIGH/CRITICAL
+                session.adaptation_applied = self.adaptive.apply(dominant, session.severity)
 
     def update_password_stat(self, db: DBSession, password: str | None) -> None:
         if not password:
