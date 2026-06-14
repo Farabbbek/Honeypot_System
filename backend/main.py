@@ -523,8 +523,50 @@ async def geoip_batch(
 
 # ─── Threats ───
 @app.get("/api/threats", response_model=list[ThreatReportOut])
-def list_threats(db: DBSession = Depends(get_db), limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)) -> list[ThreatReport]:
-    return db.query(ThreatReport).order_by(desc(ThreatReport.created_at)).offset(offset).limit(limit).all()
+def list_threats(
+    db: DBSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    type: str | None = Query(None, alias="type", description="Filter: 'interactive' (has commands) or 'bot' (no commands)"),
+    tactic: str | None = Query(None, description="Filter by session tactic (e.g. EXECUTION, CREDENTIAL_ACCESS)"),
+    severity: str | None = Query(None, description="Filter by severity (e.g. HIGH, CRITICAL)"),
+) -> list[ThreatReport]:
+    query = db.query(ThreatReport)
+
+    if type == "interactive":
+        # Sessions that ran at least one command
+        query = query.join(Session, ThreatReport.session_id == Session.session_id).filter(
+            Session.session_id.in_(
+                db.query(Event.session_id)
+                .filter(Event.event_type.in_(["cowrie.command.input", "command.input"]))
+                .filter(Event.raw_command.isnot(None))
+                .filter(Event.raw_command != "")
+                .distinct()
+            )
+        )
+    elif type == "bot":
+        # Sessions with NO commands at all
+        query = query.join(Session, ThreatReport.session_id == Session.session_id).filter(
+            ~Session.session_id.in_(
+                db.query(Event.session_id)
+                .filter(Event.event_type.in_(["cowrie.command.input", "command.input"]))
+                .filter(Event.raw_command.isnot(None))
+                .filter(Event.raw_command != "")
+                .distinct()
+            )
+        )
+
+    if tactic:
+        query = query.join(Session, ThreatReport.session_id == Session.session_id).filter(
+            Session.current_tactic == tactic.upper()
+        )
+
+    if severity:
+        query = query.join(Session, ThreatReport.session_id == Session.session_id).filter(
+            Session.severity == severity.upper()
+        )
+
+    return query.order_by(desc(ThreatReport.created_at)).offset(offset).limit(limit).all()
 
 
 @app.post("/api/threats/{session_id}/analyze", response_model=ThreatReportOut)
