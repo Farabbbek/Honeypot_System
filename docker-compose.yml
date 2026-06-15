@@ -94,7 +94,7 @@ services:
       COWRIE_HONEYFS_ROOT: /opt/cowrie/honeyfs
       REPORT_OUTPUT_DIR: /app/reports
       ALLOWED_ORIGINS: "http://159.89.103.231:3001,http://159.89.103.231"
-      DASHBOARD_URL: http://159.89.103.231
+      DASHBOARD_URL: http://159.89.103.231:3001
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
@@ -148,7 +148,7 @@ services:
       COWRIE_JSON_LOG: /var/log/cowrie/cowrie.json
       COWRIE_HONEYFS_ROOT: /opt/cowrie/honeyfs
       REPORT_OUTPUT_DIR: /app/reports
-      DASHBOARD_URL: http://159.89.103.231
+      DASHBOARD_URL: http://159.89.103.231:3001
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
