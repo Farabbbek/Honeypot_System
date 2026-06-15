@@ -357,14 +357,17 @@ class CowrieCollector:
 
         previous = session.current_tactic
         session.current_tactic = new_tactic
-        session.risk_score = new_risk
-        session.severity = new_severity
+
+        # Merge: keep the higher of accumulated per-event risk vs session-level risk
+        accumulated_risk = session.risk_score or 0
+        session.risk_score = max(new_risk, accumulated_risk)
+        session.severity = self.behavior.severity_from_score(session.risk_score)
 
         # Apply adaptation when tactic is known
         if new_tactic and new_tactic != "UNKNOWN":
-            session.adaptation_applied = self.adaptive.apply(new_tactic, new_severity)
+            session.adaptation_applied = self.adaptive.apply(new_tactic, session.severity)
         elif session.adaptation_applied in (None, PENDING_ANALYSIS_MARKER):
-            session.adaptation_applied = self.adaptive.apply("RECONNAISSANCE", new_severity)
+            session.adaptation_applied = self.adaptive.apply("RECONNAISSANCE", session.severity)
 
     def update_password_stat(self, db: DBSession, password: str | None) -> None:
         if not password:
